@@ -1,0 +1,26 @@
+# --- PYTHON (Backend) ---
+__pycache__/
+*.pyc
+backend/venv/
+backend/.venv/
+venv/
+.venv/
+*.db
+*.sqlite3
+
+# --- NODE JS (Frontend) ---
+node_modules/
+frontend/node_modules/
+dist/
+build/
+.DS_Store
+
+# --- LOGS & DATA ---
+*.log
+backend/solana_positions.json
+# backend/solana_trades.json  <-- Boleh di-uncomment kalau tidak mau simpan history trading
+# backend/trades.db           <-- Boleh di-uncomment kalau tidak mau simpan database toko
+
+# --- SECURITY (WAJIB) ---
+.env
+backend/.env
