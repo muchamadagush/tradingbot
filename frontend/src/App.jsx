@@ -1,9 +1,15 @@
 import { useEffect, useState } from 'react'
 import axios from 'axios'
 import './App.css'
+import { DashboardTab } from './components/DashboardTab'
+import { BacktestingTab } from './components/BacktestingTab'
+import { PaperTradingTab } from './components/PaperTradingTab'
+import { RiskManagementTab } from './components/RiskManagementTab'
+import { FeeCalculatorTab } from './components/FeeCalculatorTab'
 
 function App() {
   const [serverStatus, setServerStatus] = useState("Checking...")
+  const [activeTab, setActiveTab] = useState('trading')
 
   // --- STATE BOT HUNTER (Tokocrypto) ---
   const [botStatus, setBotStatus] = useState({ is_running: false, current_activity: "Idle" })
@@ -82,8 +88,11 @@ function App() {
       // 6. Ambil System Logs
       try {
         const resLogs = await axios.get('http://127.0.0.1:8000/api/system/logs')
+        console.log('System Logs:', resLogs.data)
         setSystemLogs(resLogs.data)
-      } catch (e) { }
+      } catch (e) { 
+        console.error("System Logs Error", e)
+      }
 
       setServerStatus("Connected")
 
@@ -126,17 +135,57 @@ function App() {
 
   useEffect(() => { fetchData(); const i = setInterval(fetchData, 2000); return () => clearInterval(i) }, [])
 
+  const tabs = [
+    { id: 'trading', label: '🎯 Trading', icon: '📱' },
+    { id: 'backtest', label: '📊 Backtesting', icon: '📈' },
+    { id: 'paper', label: '📄 Paper Trading', icon: '💼' },
+    { id: 'risk', label: '⚠️ Risk Manager', icon: '🔒' },
+    { id: 'fees', label: '💰 Fee Calculator', icon: '💵' }
+  ]
+
   return (
-    <div style={{ padding: '20px', fontFamily: 'Arial', maxWidth: '900px', margin: '0 auto', color: '#ecf0f1', backgroundColor: '#2c3e50', minHeight: '100vh' }}>
+    <div style={{ padding: '20px', fontFamily: 'Arial', maxWidth: '1200px', margin: '0 auto', color: '#ecf0f1', backgroundColor: '#2c3e50', minHeight: '100vh' }}>
 
       <div style={{ textAlign: 'center', marginBottom: '30px' }}>
         <h1>🦅 Crypto Hybrid Bot</h1>
         <p style={{ fontSize: '14px', color: '#bdc3c7' }}>System: <span style={{ color: serverStatus === 'Connected' ? '#2ecc71' : '#e74c3c', fontWeight: 'bold' }}>{serverStatus}</span></p>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '20px' }}>
+      {/* TAB NAVIGATION */}
+      <div style={{
+        display: 'flex',
+        gap: '8px',
+        marginBottom: '20px',
+        borderBottom: '2px solid rgba(255,255,255,0.1)',
+        overflowX: 'auto',
+        paddingBottom: '0'
+      }}>
+        {tabs.map(tab => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            style={{
+              padding: '12px 20px',
+              fontSize: '14px',
+              fontWeight: 'bold',
+              border: 'none',
+              borderBottom: activeTab === tab.id ? '3px solid #3498db' : '3px solid transparent',
+              backgroundColor: activeTab === tab.id ? 'rgba(52, 152, 219, 0.2)' : 'transparent',
+              color: activeTab === tab.id ? '#3498db' : '#bdc3c7',
+              cursor: 'pointer',
+              transition: 'all 0.3s ease',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
 
-        {/* KIRI: HUNTER */}
+      {/* TAB CONTENT */}
+      {activeTab === 'trading' && (
+        <>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '20px' }}>
         <div style={cardStyle}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
             <h3 style={{ margin: 0, color: '#34495e' }}>🎮 Hunter</h3>
@@ -304,6 +353,13 @@ function App() {
           </tbody>
         </table>
       </div>
+        </>
+      )}
+
+      {activeTab === 'backtest' && <BacktestingTab />}
+      {activeTab === 'paper' && <PaperTradingTab />}
+      {activeTab === 'risk' && <RiskManagementTab />}
+      {activeTab === 'fees' && <FeeCalculatorTab />}
     </div>
   )
 }

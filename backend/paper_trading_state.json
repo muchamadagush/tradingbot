@@ -1,0 +1,26 @@
+{
+  "initial_balance": 1000.0,
+  "balance": 900.0,
+  "positions": {
+    "BTC/USDT": {
+      "amount": 0.0010934434612679701,
+      "entry_price": 91362.748545,
+      "timestamp": "2026-01-09T05:24:59.837028"
+    }
+  },
+  "orders_history": [
+    {
+      "id": 1,
+      "type": "MARKET_BUY",
+      "symbol": "BTC/USDT",
+      "amount_usdt": 100,
+      "execution_price": 91362.748545,
+      "asset_amount": 0.0010934434612679701,
+      "fee": 0.1,
+      "timestamp": "2026-01-09T05:24:59.837028",
+      "status": "filled"
+    }
+  ],
+  "trades_history": [],
+  "last_updated": "2026-01-09T05:24:59.837028"
+}
