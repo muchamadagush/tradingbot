@@ -1,149 +1,105 @@
 # File: backend/backtesting.py
-"""
-BACKTESTING ENGINE
-Testing strategi trading menggunakan data historis tanpa risiko uang asli.
-"""
-
 import ccxt.async_support as ccxt
 import pandas as pd
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 import strategy
-from typing import Dict, List
 import json
 
 class BacktestEngine:
-    def __init__(self, exchange_id='tokocrypto', initial_capital=1000.0):
-        """
-        Args:
-            exchange_id: ID exchange untuk ambil data (default: tokocrypto)
-            initial_capital: Modal awal dalam USDT untuk testing
-        """
+    def __init__(self, exchange_id='tokocrypto', initial_capital=1000.0, 
+                 enable_risk_manager=True, trade_amount_usdt=12.0):
         self.exchange_id = exchange_id
         self.initial_capital = initial_capital
-        self.trading_fee = 0.001  # 0.1% default (adjust sesuai exchange)
-        self.slippage_pct = 0.0005  # 0.05% slippage estimation
+        self.enable_risk_manager = enable_risk_manager
+        self.trade_amount_usdt = trade_amount_usdt
+        self.trading_fee = 0.001
+        self.slippage_pct = 0.0005
         
     async def fetch_historical_data(self, symbol, timeframe='1h', days_back=30):
-        """
-        Mengambil data historis dari exchange
-        
-        Args:
-            symbol: Trading pair (e.g., 'BTC/USDT')
-            timeframe: Timeframe candle ('1m', '5m', '15m', '1h', '4h', '1d')
-            days_back: Berapa hari ke belakang
-            
-        Returns:
-            DataFrame dengan OHLCV data
-        """
-        exchange = getattr(ccxt, self.exchange_id)({
-            'enableRateLimit': True,
-        })
-        
+        exchange = getattr(ccxt, self.exchange_id)({'enableRateLimit': True})
         try:
             await exchange.load_markets()
-            
-            # Calculate how many candles needed
-            timeframe_minutes = {
-                '1m': 1, '5m': 5, '15m': 15, '30m': 30,
-                '1h': 60, '4h': 240, '1d': 1440
-            }
-            minutes = timeframe_minutes.get(timeframe, 60)
+            tf_minutes = {'1m': 1, '5m': 5, '15m': 15, '1h': 60, '4h': 240, '1d': 1440}
+            minutes = tf_minutes.get(timeframe, 60)
             limit = int((days_back * 24 * 60) / minutes)
-            limit = min(limit, 1000)  # Max 1000 candles per request
+            limit = min(limit, 1000) 
             
-            print(f"📊 Fetching {limit} candles of {symbol} ({timeframe})...")
+            print(f"📊 Fetching {limit} candles of {symbol}...")
             ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-            
+            if not ohlcv: return None
+
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            
-            print(f"✅ Downloaded {len(df)} candles from {df['timestamp'].min()} to {df['timestamp'].max()}")
-            
+            print(f"✅ Loaded {len(df)} candles.")
             await exchange.close()
             return df
-            
         except Exception as e:
             print(f"❌ Error fetching data: {e}")
             await exchange.close()
             return None
     
     async def run_backtest(self, symbol, timeframe='1h', days_back=30, 
-                          take_profit_pct=1.5, stop_loss_pct=3.0):
-        """
-        Menjalankan backtest dengan strategi yang ada
-        
-        Args:
-            symbol: Trading pair
-            timeframe: Timeframe untuk analisis
-            days_back: Periode testing
-            take_profit_pct: Take profit dalam % (default 1.5%)
-            stop_loss_pct: Stop loss dalam % (default 3.0%)
-            
-        Returns:
-            Dictionary berisi hasil backtest
-        """
+                          take_profit_pct=5, stop_loss_pct=2.5):
         print(f"\n{'='*60}")
-        print(f"🔬 BACKTESTING: {symbol}")
-        print(f"📅 Period: Last {days_back} days | Timeframe: {timeframe}")
-        print(f"💰 Initial Capital: ${self.initial_capital}")
-        print(f"📊 TP: {take_profit_pct}% | SL: {stop_loss_pct}%")
+        print(f"🔬 BACKTESTING: {symbol} (Strategy: ADX Switch)")
+        print(f"💰 Capital: ${self.initial_capital} | TP: {take_profit_pct}% | SL: {stop_loss_pct}%")
         print(f"{'='*60}\n")
         
-        # Fetch historical data
         df = await self.fetch_historical_data(symbol, timeframe, days_back)
-        if df is None or len(df) < 100:
-            return {"error": "Insufficient data"}
+        if df is None or len(df) < 50: return {"error": "Insufficient data"}
         
-        # Calculate indicators once for all data
-        df['RSI'] = strategy.calculate_rsi(df['close'])
-        df['MACD'], df['Signal_Line'], _ = strategy.calculate_macd(df['close'])
-        df['Upper_BB'], df['Lower_BB'] = strategy.calculate_bollinger_bands(df['close'])
+        # 1. HITUNG INDIKATOR
+        try:
+            df = strategy.populate_indicators(df)
+        except Exception as e:
+            return {"error": f"Indicator Error: {str(e)}"}
         
-        # Backtest variables
         capital = self.initial_capital
-        position = None  # {'entry_price': float, 'amount': float, 'entry_time': timestamp}
+        position = None 
         trades = []
+        equity_curve = [capital]
         
-        # Iterate through each candle
-        for i in range(100, len(df)):  # Start from 100 to have enough data for indicators
+        # 2. LOOP DATA
+        start_idx = 50 
+        
+        # --- DEBUG: Print Data Sample (ANTI-CRASH) ---
+        print("🔍 DEBUG: Checking Indicators...")
+        cols_to_check = ['timestamp', 'close', 'RSI', 'ADX', 'Upper_BB', 'Lower_BB']
+        existing_cols = [c for c in cols_to_check if c in df.columns]
+        print(df[existing_cols].iloc[start_idx:start_idx+3])
+        
+        if len(existing_cols) < len(cols_to_check):
+            missing = list(set(cols_to_check) - set(existing_cols))
+            print(f"⚠️ WARNING: Missing columns: {missing}")
+            # Jangan return error, lanjut saja agar kita tau performanya
+        print("-" * 30)
+
+        for i in range(start_idx, len(df)):
             current_row = df.iloc[:i+1]
-            current_price = current_row['close'].iloc[-1]
-            current_time = current_row['timestamp'].iloc[-1]
+            current_bar = current_row.iloc[-1]
+            current_price = current_bar['close']
+            current_time = current_bar['timestamp']
             
-            # If we have an open position, check exit conditions
+            # --- CEK EXIT ---
             if position:
                 entry_price = position['entry_price']
                 pnl_pct = ((current_price - entry_price) / entry_price) * 100
                 
-                # Check Take Profit
-                if pnl_pct >= take_profit_pct:
-                    sell_price = current_price * (1 - self.slippage_pct)  # Account for slippage
-                    profit_before_fee = (sell_price - entry_price) * position['amount']
-                    fee = sell_price * position['amount'] * self.trading_fee
-                    net_profit = profit_before_fee - fee
-                    capital += (position['amount'] * sell_price) - fee
-                    
-                    trades.append({
-                        'entry_time': position['entry_time'],
-                        'exit_time': current_time,
-                        'entry_price': entry_price,
-                        'exit_price': sell_price,
-                        'amount': position['amount'],
-                        'profit': net_profit,
-                        'profit_pct': pnl_pct,
-                        'exit_reason': 'TAKE_PROFIT',
-                        'fees_paid': fee
-                    })
-                    position = None
-                    continue
+                exit_reason = None
+                if pnl_pct >= take_profit_pct: exit_reason = "TAKE_PROFIT"
+                elif pnl_pct <= -stop_loss_pct: exit_reason = "STOP_LOSS"
                 
-                # Check Stop Loss
-                if pnl_pct <= -stop_loss_pct:
+                if not exit_reason:
+                    decision = strategy.decide_strategy(current_row)
+                    if decision['action'] == "SELL":
+                        exit_reason = f"STRATEGY_SELL ({decision['selected_strategy']})"
+
+                if exit_reason:
                     sell_price = current_price * (1 - self.slippage_pct)
-                    profit_before_fee = (sell_price - entry_price) * position['amount']
+                    profit_raw = (sell_price - entry_price) * position['amount']
                     fee = sell_price * position['amount'] * self.trading_fee
-                    net_profit = profit_before_fee - fee
+                    net_profit = profit_raw - fee
                     capital += (position['amount'] * sell_price) - fee
                     
                     trades.append({
@@ -154,88 +110,73 @@ class BacktestEngine:
                         'amount': position['amount'],
                         'profit': net_profit,
                         'profit_pct': pnl_pct,
-                        'exit_reason': 'STOP_LOSS',
+                        'exit_reason': exit_reason,
                         'fees_paid': fee
                     })
+                    print(f"🔴 SELL at {current_time} | Reason: {exit_reason} | PnL: {pnl_pct:.2f}%")
                     position = None
+                    equity_curve.append(capital)
                     continue
             
-            # If no position, check for entry signals
+            # --- CEK ENTRY ---
             else:
-                # Get strategy signals
-                vote_rsi = strategy.check_rsi_strategy(current_row)
-                vote_macd = strategy.check_macd_strategy(current_row)
-                vote_bb = strategy.check_bb_strategy(current_row)
+                decision = strategy.decide_strategy(current_row)
+                action = decision['action']
                 
-                buy_score = sum([1 for v in [vote_rsi, vote_macd, vote_bb] if v == "BUY"])
-                
-                # Enter position if 2+ buy signals
-                if buy_score >= 2:
-                    buy_price = current_price * (1 + self.slippage_pct)  # Account for slippage
-                    fee = capital * self.trading_fee
-                    amount = (capital - fee) / buy_price
-                    
-                    position = {
-                        'entry_price': buy_price,
-                        'amount': amount,
-                        'entry_time': current_time
-                    }
-                    capital = 0  # All capital in position
+                if action == "BUY":
+                    # Debug print saat sinyal beli muncul
+                    # print(f"💡 Signal: {current_time} | {decision['selected_strategy']} | {decision['reason']}")
+
+                    trade_size = self.trade_amount_usdt if self.enable_risk_manager else capital
+                    if trade_size > capital: trade_size = capital
+
+                    if capital >= trade_size and trade_size > 5:
+                        buy_price = current_price * (1 + self.slippage_pct)
+                        fee = trade_size * self.trading_fee
+                        cost = trade_size + fee
+                        
+                        if capital >= cost:
+                            amount = trade_size / buy_price
+                            position = {
+                                'entry_price': buy_price,
+                                'amount': amount,
+                                'entry_time': current_time
+                            }
+                            capital -= cost
+                            print(f"🟢 BUY at {current_time} | Price: {buy_price:.2f} | Strategy: {decision['selected_strategy']}")
         
-        # Close any remaining open position at last price
+        # Tutup posisi akhir
         if position:
-            sell_price = df['close'].iloc[-1] * (1 - self.slippage_pct)
-            profit_before_fee = (sell_price - position['entry_price']) * position['amount']
-            fee = sell_price * position['amount'] * self.trading_fee
-            net_profit = profit_before_fee - fee
-            capital += (position['amount'] * sell_price) - fee
-            
-            pnl_pct = ((sell_price - position['entry_price']) / position['entry_price']) * 100
-            
-            trades.append({
-                'entry_time': position['entry_time'],
-                'exit_time': df['timestamp'].iloc[-1],
-                'entry_price': position['entry_price'],
-                'exit_price': sell_price,
-                'amount': position['amount'],
-                'profit': net_profit,
-                'profit_pct': pnl_pct,
-                'exit_reason': 'END_OF_BACKTEST',
-                'fees_paid': fee
-            })
-            position = None
-        
-        # Calculate statistics
+            sell_price = df['close'].iloc[-1]
+            profit = (sell_price - position['entry_price']) * position['amount']
+            capital += (position['amount'] * sell_price)
+            trades.append({'profit': profit, 'exit_reason': 'FORCE_CLOSE', 'profit_pct': 0})
+            equity_curve.append(capital)
+
+        # Hitung Statistik
         total_trades = len(trades)
-        winning_trades = [t for t in trades if t['profit'] > 0]
-        losing_trades = [t for t in trades if t['profit'] <= 0]
+        wins = len([t for t in trades if t['profit'] > 0])
+        losing = len([t for t in trades if t['profit'] <= 0])
         
-        win_rate = (len(winning_trades) / total_trades * 100) if total_trades > 0 else 0
         total_profit = sum([t['profit'] for t in trades])
-        total_fees = sum([t['fees_paid'] for t in trades])
+        total_fees = sum([t.get('fees_paid', 0) for t in trades])
+        roi = ((capital - self.initial_capital) / self.initial_capital) * 100
         
-        final_capital = capital
-        roi = ((final_capital - self.initial_capital) / self.initial_capital) * 100
+        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+        avg_win = sum([t['profit'] for t in trades if t['profit'] > 0]) / wins if wins > 0 else 0
+        avg_loss = sum([t['profit'] for t in trades if t['profit'] <= 0]) / losing if losing > 0 else 0
         
-        avg_win = sum([t['profit'] for t in winning_trades]) / len(winning_trades) if winning_trades else 0
-        avg_loss = sum([t['profit'] for t in losing_trades]) / len(losing_trades) if losing_trades else 0
-        profit_factor = abs(sum([t['profit'] for t in winning_trades]) / sum([t['profit'] for t in losing_trades])) if losing_trades and sum([t['profit'] for t in losing_trades]) != 0 else 0
-        
-        # Max Drawdown calculation
-        equity_curve = [self.initial_capital]
-        running_capital = self.initial_capital
-        for trade in trades:
-            running_capital += trade['profit']
-            equity_curve.append(running_capital)
-        
-        peak = equity_curve[0]
+        gross_profit = sum([t['profit'] for t in trades if t['profit'] > 0])
+        gross_loss = abs(sum([t['profit'] for t in trades if t['profit'] <= 0]))
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0
+
+        # Hitung Max Drawdown
         max_dd = 0
-        for equity in equity_curve:
-            if equity > peak:
-                peak = equity
-            dd = ((peak - equity) / peak) * 100
-            if dd > max_dd:
-                max_dd = dd
+        peak = equity_curve[0]
+        for val in equity_curve:
+            if val > peak: peak = val
+            dd = (peak - val) / peak * 100
+            if dd > max_dd: max_dd = dd
         
         results = {
             'status': 'completed',
@@ -243,12 +184,12 @@ class BacktestEngine:
             'timeframe': timeframe,
             'period_days': days_back,
             'initial_capital': self.initial_capital,
-            'final_capital': round(final_capital, 2),
+            'final_capital': round(capital, 2),
             'net_profit': round(total_profit, 2),
             'roi_pct': round(roi, 2),
             'total_trades': total_trades,
-            'winning_trades': len(winning_trades),
-            'losing_trades': len(losing_trades),
+            'winning_trades': wins,
+            'losing_trades': losing,
             'win_rate_pct': round(win_rate, 2),
             'avg_win': round(avg_win, 2),
             'avg_loss': round(avg_loss, 2),
@@ -258,57 +199,20 @@ class BacktestEngine:
             'trades': trades
         }
         
-        # Print summary
-        print(f"\n{'='*60}")
-        print(f"📊 BACKTEST RESULTS")
-        print(f"{'='*60}")
-        print(f"💰 Initial Capital: ${self.initial_capital:.2f}")
-        print(f"💵 Final Capital: ${final_capital:.2f}")
-        print(f"📈 Net Profit: ${total_profit:.2f} ({roi:.2f}%)")
-        print(f"📊 Total Trades: {total_trades}")
-        print(f"✅ Win Rate: {win_rate:.2f}% ({len(winning_trades)}W / {len(losing_trades)}L)")
-        print(f"💸 Total Fees: ${total_fees:.2f}")
-        print(f"📉 Max Drawdown: {max_dd:.2f}%")
-        print(f"⚖️ Profit Factor: {profit_factor:.2f}")
-        print(f"{'='*60}\n")
-        
+        print(f"📊 RESULT: ROI {roi:.2f}% | Trades: {total_trades} | WinRate: {win_rate:.1f}%")
         return results
 
-# Helper function untuk batch backtest multiple symbols
-async def batch_backtest(symbols: List[str], timeframe='1h', days_back=30):
-    """
-    Run backtest untuk multiple symbols sekaligus
-    """
-    engine = BacktestEngine()
+async def batch_backtest(symbols, timeframe='1h', days_back=30, enable_risk_manager=True, trade_amount_usdt=12.0):
+    engine = BacktestEngine(
+        enable_risk_manager=enable_risk_manager, 
+        trade_amount_usdt=trade_amount_usdt
+    )
     results = []
-    
-    for symbol in symbols:
-        result = await engine.run_backtest(symbol, timeframe, days_back)
-        results.append(result)
-        await asyncio.sleep(1)  # Rate limiting
-    
-    # Sort by ROI
-    results.sort(key=lambda x: x.get('roi_pct', -999), reverse=True)
-    
-    print(f"\n{'='*60}")
-    print(f"📊 BATCH BACKTEST SUMMARY")
-    print(f"{'='*60}")
-    for r in results:
-        if 'error' not in r:
-            print(f"{r['symbol']:15} | ROI: {r['roi_pct']:+7.2f}% | Trades: {r['total_trades']:3} | Win Rate: {r['win_rate_pct']:5.1f}%")
-    print(f"{'='*60}\n")
-    
+    for sym in symbols:
+        res = await engine.run_backtest(sym, timeframe, days_back)
+        results.append(res)
+        await asyncio.sleep(1)
     return results
 
 if __name__ == "__main__":
-    # Example usage
-    async def main():
-        engine = BacktestEngine(initial_capital=1000.0)
-        result = await engine.run_backtest('BTC/USDT', timeframe='1h', days_back=30)
-        
-        # Save to file
-        with open('backtest_result.json', 'w') as f:
-            json.dump(result, f, indent=2, default=str)
-        print("💾 Results saved to backtest_result.json")
-    
-    asyncio.run(main())
+    asyncio.run(BacktestEngine().run_backtest('BTC/USDT'))

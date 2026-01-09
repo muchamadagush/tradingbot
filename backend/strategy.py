@@ -3,108 +3,139 @@ import pandas as pd
 import pandas_ta as ta
 
 # ==========================================
-# BAGIAN 1: RUMUS MATEMATIKA (ENGINEERING)
+# 1. RUMUS & INDIKATOR
 # ==========================================
 
 def _ema(series, length):
     return ta.ema(series, length=length)
 
+def populate_indicators(df):
+    """
+    Menghitung indikator dengan Dynamic Mapping (Anti-Error).
+    """
+    df = df.copy()
+    
+    # Safety: Pastikan data numerik
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    try:
+        # Hitung indikator
+        df.ta.rsi(length=14, append=True)
+        df.ta.macd(fast=12, slow=26, signal=9, append=True)
+        df.ta.bbands(length=20, std=2, append=True)
+        df.ta.adx(length=14, append=True)
+    except Exception as e:
+        print(f"⚠️ Error calculating indicators: {e}")
+        return df
+
+    # Dynamic Column Mapping
+    cols = df.columns.tolist()
+    
+    rsi_col = next((c for c in cols if c.startswith('RSI_')), None)
+    if rsi_col: df['RSI'] = df[rsi_col]
+
+    macd_col = next((c for c in cols if c.startswith('MACD_') and 'h' not in c and 's' not in c), None)
+    sig_col = next((c for c in cols if c.startswith('MACDs_')), None)
+    if macd_col: df['MACD'] = df[macd_col]
+    if sig_col: df['Signal_Line'] = df[sig_col]
+
+    upper_col = next((c for c in cols if c.startswith('BBU_')), None)
+    lower_col = next((c for c in cols if c.startswith('BBL_')), None)
+    if upper_col: df['Upper_BB'] = df[upper_col]
+    if lower_col: df['Lower_BB'] = df[lower_col]
+
+    adx_col = next((c for c in cols if c.startswith('ADX_')), None)
+    if adx_col: df['ADX'] = df[adx_col]
+        
+    return df
+
 # ==========================================
-# BAGIAN 2: PARA JURI (STRATEGI)
-# ==========================================
-
-def check_rsi_strategy(df):
-    """Juri 1: RSI"""
-    last_rsi = df['RSI'].iloc[-1]
-    if last_rsi < 30: return "BUY"
-    elif last_rsi > 70: return "SELL"
-    return "NEUTRAL"
-
-def check_macd_strategy(df):
-    """Juri 2: MACD"""
-    # Cek crossover: MACD Line memotong Signal Line ke atas (Golden Cross)
-    curr_macd = df['MACD'].iloc[-1]
-    curr_sig = df['Signal_Line'].iloc[-1]
-    prev_macd = df['MACD'].iloc[-2]
-    prev_sig = df['Signal_Line'].iloc[-2]
-
-    # Cross UP (Beli)
-    if prev_macd < prev_sig and curr_macd > curr_sig:
-        return "BUY"
-    # Cross DOWN (Jual)
-    elif prev_macd > prev_sig and curr_macd < curr_sig:
-        return "SELL"
-    return "NEUTRAL"
-
-def check_bb_strategy(df):
-    """Juri 3: Bollinger Bands"""
-    price = df['close'].iloc[-1]
-    lower = df['Lower_BB'].iloc[-1]
-    upper = df['Upper_BB'].iloc[-1]
-
-    # Harga menyentuh/tembus bawah (Diskon)
-    if price <= lower: 
-        return "BUY"
-    # Harga menyentuh/tembus atas (Mahal)
-    elif price >= upper: 
-        return "SELL"
-    return "NEUTRAL"
-
-# ==========================================
-# BAGIAN 3B: META STRATEGY / BOT MANAGER
+# 2. LOGIKA INTI (DECISION MAKER)
 # ==========================================
 
 def decide_strategy(df):
-    """Select strategy based on market regime using ADX and BB width."""
-    adx_value = df['ADX'].iloc[-1] if 'ADX' in df else 0
+    """
+    META STRATEGY: Harmonisasi antara Breakout, Trend, dan Sideways.
+    """
+    last = df.iloc[-1]
+    
+    required_cols = ['ADX', 'Upper_BB', 'Lower_BB', 'RSI', 'close']
+    if not all(col in df.columns for col in required_cols):
+         return {"action": "HOLD", "reason": "Incomplete Data", "strategy": "WAITING", "adx": 0, "bb_width": 0}
 
-    middle = df['close'].rolling(window=20).mean()
-    bb_width = ((df['Upper_BB'] - df['Lower_BB']) / middle).iloc[-1] if 'Upper_BB' in df and 'Lower_BB' in df else 1
+    if pd.isna(last.get('ADX')):
+        return {"action": "HOLD", "reason": "NaN ADX", "strategy": "WAITING", "adx": 0, "bb_width": 0}
 
-    # Strategy 1: Trend following (EMA crossover) when ADX strong
-    def strategy_ema(df):
+    # Hitung Metrics
+    adx_value = last['ADX']
+    close_price = last['close']
+    bb_width = (last['Upper_BB'] - last['Lower_BB']) / close_price if close_price != 0 else 0
+
+    # --- SUB-STRATEGIES ---
+    
+    def strategy_trend():
+        if len(df) < 5: return "HOLD", "Wait data"
         fast = _ema(df['close'], 9)
         slow = _ema(df['close'], 21)
-        if fast.iloc[-2] < slow.iloc[-2] and fast.iloc[-1] > slow.iloc[-1]:
-            return "BUY", "EMA golden cross"
-        if fast.iloc[-2] > slow.iloc[-2] and fast.iloc[-1] < slow.iloc[-1]:
-            return "SELL", "EMA death cross"
-        return "HOLD", "EMA flat"
+        
+        # BUY: Uptrend
+        if fast.iloc[-1] > slow.iloc[-1]:
+            # Filter: Jangan beli di pucuk (RSI > 75)
+            if last['RSI'] < 75: return "BUY", "Uptrend & Healthy RSI"
+            return "HOLD", "Uptrend but Overbought"
+            
+        # SELL: Death Cross (Trend Berakhir)
+        if fast.iloc[-1] < slow.iloc[-1]:
+            return "SELL", "Downtrend Confirmed"
+            
+        return "HOLD", "No Signal"
 
-    # Strategy 2: Mean reversion when sideways
-    def strategy_rsi(df):
-        rsi = df['RSI'].iloc[-1]
-        if rsi < 30:
-            return "BUY", "RSI oversold"
-        if rsi > 70:
-            return "SELL", "RSI overbought"
-        return "HOLD", "RSI neutral"
+    def strategy_sideways():
+        # Mean Reversion
+        rsi = last['RSI']
+        
+        # BUY: Oversold
+        if rsi < 45: return "BUY", f"RSI Cheap ({rsi:.1f})"
+        
+        # SELL: Overbought Extreem Saja
+        # PERUBAHAN PENTING: Dulu 55, sekarang 72.
+        # Ini mencegah bot menjual terlalu cepat saat Breakout baru terjadi.
+        if rsi > 72: return "SELL", f"RSI Peak ({rsi:.1f})"
+        
+        return "HOLD", "RSI Neutral"
 
-    # Strategy 3: Breakout during squeeze
-    def strategy_breakout(df):
-        price = df['close'].iloc[-1]
-        upper = df['Upper_BB'].iloc[-1]
-        lower = df['Lower_BB'].iloc[-1]
-        if price > upper:
-            return "BUY", "Breakout above upper BB"
-        if price < lower:
-            return "SELL", "Breakdown below lower BB"
-        return "HOLD", "Waiting for breakout"
+    def strategy_breakout():
+        # Breakout
+        # Filter RSI > 50 memastikan breakout didukung momentum beli
+        if last['close'] > last['Upper_BB'] and last['RSI'] > 50: 
+            return "BUY", "Valid Breakout Up"
+        
+        if last['close'] < last['Lower_BB']: 
+            return "SELL", "Breakdown Down"
+            
+        return "HOLD", "Inside Squeeze"
 
-    selected = "MEAN_REVERSION"
+    # --- LOGIC SWITCH (TUNING HARMONIS) ---
+    selected = "UNKNOWN"
     action = "HOLD"
-    reason = "Default"
+    reason = "Wait"
 
-    # Tight squeeze first priority
-    if bb_width < 0.05:
+    # 1. Squeeze: Masih ketat (8%), mencari ledakan
+    if bb_width < 0.08: 
         selected = "BREAKOUT"
-        action, reason = strategy_breakout(df)
-    elif adx_value > 25:
+        action, reason = strategy_breakout()
+        
+    # 2. Trend: Batas diturunkan ke 20 agar lebih cepat mendeteksi 'Follow Through' dari Breakout
+    elif adx_value > 20: 
         selected = "TREND_FOLLOWING"
-        action, reason = strategy_ema(df)
-    else:
+        action, reason = strategy_trend()
+        
+    # 3. Sideways: Mode default
+    else: 
         selected = "MEAN_REVERSION"
-        action, reason = strategy_rsi(df)
+        action, reason = strategy_sideways()
 
     return {
         "selected_strategy": selected,
@@ -115,81 +146,36 @@ def decide_strategy(df):
     }
 
 # ==========================================
-# BAGIAN 3: MANAGER (PENGAMBIL KEPUTUSAN)
+# 3. INTERFACE LIVE TRADING
 # ==========================================
 
-async def analyze_market(exchange, symbol): # <-- Tambah 'async'
+async def analyze_market(exchange, symbol):
     try:
-        # 1. Ambil Data Candle (Pakai await karena ini request internet)
-        # ccxt async butuh 'await' di depannya
         if exchange.has['fetchOHLCV']:
-            bars = await exchange.fetch_ohlcv(symbol, timeframe='1m', limit=100) # <-- Tambah 'await'
-        else:
-            return "ERROR", 0, {}
+            bars = await exchange.fetch_ohlcv(symbol, timeframe='1m', limit=100)
+        else: return "ERROR", 0, {}
 
         if not bars: return "ERROR", 0, {}
         
         df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-
-        # 2. Hitung indikator menggunakan pandas_ta
-        df.ta.rsi(length=14, append=True)
-        df.ta.macd(fast=12, slow=26, signal=9, append=True)
-        df.ta.bbands(length=20, std=2, append=True)
-        df.ta.adx(length=14, append=True)
-
-        # 2b. Normalisasi nama kolom ke yang dipakai bot
-        if 'RSI_14' in df:
-            df['RSI'] = df['RSI_14']
-        if 'MACD_12_26_9' in df:
-            df['MACD'] = df['MACD_12_26_9']
-        if 'MACDs_12_26_9' in df:
-            df['Signal_Line'] = df['MACDs_12_26_9']
-        if 'BBU_20_2.0' in df:
-            df['Upper_BB'] = df['BBU_20_2.0']
-        if 'BBL_20_2.0' in df:
-            df['Lower_BB'] = df['BBL_20_2.0']
-        if 'ADX_14' in df:
-            df['ADX'] = df['ADX_14']
+        df = populate_indicators(df)
         
+        if df.empty: return "ERROR", 0, {}
         current_price = df['close'].iloc[-1]
 
-        # 3. Minta Pendapat Para Juri
-        vote_rsi = check_rsi_strategy(df)
-        vote_macd = check_macd_strategy(df)
-        vote_bb = check_bb_strategy(df)
-
-        # 4. Hitung Skor
-        buy_score = 0
-        sell_score = 0
-        if vote_rsi == "BUY": buy_score += 1
-        if vote_macd == "BUY": buy_score += 1
-        if vote_bb == "BUY": buy_score += 1
-        if vote_rsi == "SELL": sell_score += 1
-        if vote_macd == "SELL": sell_score += 1
-        if vote_bb == "SELL": sell_score += 1
-
-        # 5. Meta Strategy decides which weapon to use
-        manager = decide_strategy(df)
-
-        final_action = manager['action'] if manager['action'] != "HOLD" else "HOLD"
-        # Fallback to vote-based if manager is neutral
-        if final_action == "HOLD":
-            if buy_score >= 2: final_action = "BUY"
-            elif sell_score >= 2: final_action = "SELL"
-            elif df['RSI'].iloc[-1] > 70: final_action = "SELL"
+        decision = decide_strategy(df)
+        final_action = decision['action']
 
         indicators = {
-            "rsi": df['RSI'].iloc[-1],
-            "votes_buy": buy_score,
-            "votes_sell": sell_score,
-            "adx": manager['adx'],
-            "bb_width": manager['bb_width'],
-            "strategy": manager['selected_strategy'],
-            "strategy_reason": manager['reason']
+            "rsi": df['RSI'].iloc[-1] if 'RSI' in df.columns else 0,
+            "adx": decision['adx'],
+            "bb_width": decision['bb_width'],
+            "strategy": decision['selected_strategy'],
+            "reason": decision['reason']
         }
         
-        # Print Debugging
-        print(f"📊 {symbol} | RSI:{vote_rsi} MACD:{vote_macd} BB:{vote_bb} -> {final_action}")
+        if final_action != "HOLD":
+            print(f"📊 {symbol} | {decision['selected_strategy']} | {decision['reason']} -> {final_action}")
         
         return final_action, current_price, indicators
 

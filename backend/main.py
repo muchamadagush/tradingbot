@@ -438,7 +438,7 @@ def get_system_logs():
 @app.post("/api/backtest/run")
 async def run_backtest(request: dict):
     """
-    Run backtest untuk strategi
+    Run backtest untuk strategi Tokocrypto (Voting System + Risk Manager)
     
     Body:
         {
@@ -447,7 +447,9 @@ async def run_backtest(request: dict):
             "days_back": 30,
             "initial_capital": 1000,
             "take_profit_pct": 1.5,
-            "stop_loss_pct": 3.0
+            "stop_loss_pct": 3.0,
+            "enable_risk_manager": true,
+            "trade_amount_usdt": 12.0
         }
     """
     symbol = request.get('symbol', 'BTC/USDT')
@@ -456,8 +458,14 @@ async def run_backtest(request: dict):
     initial_capital = request.get('initial_capital', 1000.0)
     take_profit_pct = request.get('take_profit_pct', 1.5)
     stop_loss_pct = request.get('stop_loss_pct', 3.0)
+    enable_risk_manager = request.get('enable_risk_manager', True)
+    trade_amount_usdt = request.get('trade_amount_usdt', 12.0)
     
-    engine = backtesting.BacktestEngine(initial_capital=initial_capital)
+    engine = backtesting.BacktestEngine(
+        initial_capital=initial_capital,
+        enable_risk_manager=enable_risk_manager,
+        trade_amount_usdt=trade_amount_usdt
+    )
     result = await engine.run_backtest(
         symbol=symbol,
         timeframe=timeframe,
@@ -475,20 +483,30 @@ async def run_backtest(request: dict):
 @app.post("/api/backtest/batch")
 async def run_batch_backtest(request: dict):
     """
-    Run backtest untuk multiple symbols
+    Run backtest untuk multiple symbols dengan strategi Tokocrypto
     
     Body:
         {
             "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
             "timeframe": "1h",
-            "days_back": 30
+            "days_back": 30,
+            "enable_risk_manager": true,
+            "trade_amount_usdt": 12.0
         }
     """
     symbols = request.get('symbols', ['BTC/USDT', 'ETH/USDT'])
     timeframe = request.get('timeframe', '1h')
     days_back = request.get('days_back', 30)
+    enable_risk_manager = request.get('enable_risk_manager', True)
+    trade_amount_usdt = request.get('trade_amount_usdt', 12.0)
     
-    results = await backtesting.batch_backtest(symbols, timeframe, days_back)
+    results = await backtesting.batch_backtest(
+        symbols, 
+        timeframe, 
+        days_back,
+        enable_risk_manager=enable_risk_manager,
+        trade_amount_usdt=trade_amount_usdt
+    )
     
     # Save all to database
     for result in results:
