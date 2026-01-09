@@ -7,6 +7,7 @@ from datetime import datetime
 import aiohttp
 import pandas as pd
 import pandas_ta as ta
+from solders.pubkey import Pubkey  # Import baru untuk cek desimal
 
 from jupiter_handler import jupiter_bot, TOKENS
 import solana_tracker
@@ -16,10 +17,10 @@ import sys_logger
 import strategy
 
 POSITIONS_FILE = "solana_positions.json"
-TAKE_PROFIT_PCT = 50.0   # Target Profit (Bisa disesuaikan)
-STOP_LOSS_PCT = -15.0    # Toleransi rugi (Stop Loss)
-TRADE_AMOUNT_SOL = 0.001 
-MAX_POSITIONS = 10        # 🔥 UPGRADE: Bot bisa pegang 3 koin sekaligus
+TAKE_PROFIT_PCT = 100.0   # Target Profit
+STOP_LOSS_PCT = -40.0    # Stop Loss
+TRADE_AMOUNT_SOL = 0.015  # Jumlah SOL per trade
+MAX_POSITIONS = 10  # Maksimal posisi bersamaan
 
 class SolanaAutoBot:
     def __init__(self):
@@ -29,7 +30,6 @@ class SolanaAutoBot:
         self.target_address = None
         self.target_pair_address = None
         
-        # UBAH STRUKTUR DATA: Dari Single Object ke List (Array)
         self.active_positions = [] 
         self.recently_sold = [] 
         self.load_positions()
@@ -39,7 +39,6 @@ class SolanaAutoBot:
             try:
                 with open(POSITIONS_FILE, 'r') as f:
                     data = json.load(f)
-                    # Migrasi otomatis dari format lama (dict) ke baru (list)
                     if isinstance(data, dict):
                         self.active_positions = [data]
                     elif isinstance(data, list):
@@ -62,11 +61,21 @@ class SolanaAutoBot:
         self.save_positions()
 
     def remove_position(self, token_symbol):
-        # Hapus token dari list posisi
         self.active_positions = [p for p in self.active_positions if p['token'] != token_symbol]
         self.save_positions()
 
-    # --- API HELPER (GeckoTerminal - Gratis & Stabil) ---
+    # --- HELPER: GET DECIMALS (FIX PNL BUG) ---
+    async def get_token_decimals(self, address: str):
+        """Ambil desimal token langsung dari Blockchain untuk fix kalkulasi."""
+        try:
+            # Menggunakan client RPC yang sudah ada di safety_checker
+            resp = await safety_checker.client.get_token_supply(Pubkey.from_string(address))
+            return resp.value.decimals
+        except Exception as e:
+            # sys_logger.add_log(f"⚠️ Decimals check fail: {e}")
+            return 6  # Default fallback untuk memecoins (biasanya 6)
+
+    # --- API HELPER (GeckoTerminal) ---
     async def _fetch_candles(self, pair_address: str, interval="1m", limit=100):
         if not pair_address: return None
         url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/minute?limit={limit}"
@@ -90,12 +99,10 @@ class SolanaAutoBot:
             if len(df) < 20: return False, f"Not enough data: {len(df)}"
             df = df.copy()
             
-            # Hitung Indikator
             df.ta.rsi(length=14, append=True)
             df.ta.macd(fast=12, slow=26, signal=9, append=True)
             df.ta.bbands(length=20, std=2, append=True)
             
-            # Mapping Kolom (Aman jika nama kolom berubah)
             cols = df.columns
             rsi_col = next((c for c in cols if c.startswith('RSI')), None)
             macd_col = next((c for c in cols if c.startswith('MACD_') and not c.startswith('MACDs')), None)
@@ -108,18 +115,15 @@ class SolanaAutoBot:
             last = df.iloc[-1]
             votes = []
             
-            # 1. RSI Oversold (Diskon)
             if last[rsi_col] < 40: votes.append("RSI") 
-            # 2. MACD Bullish Crossover (Momentum Naik)
             if last[macd_col] > last[sig_col]: votes.append("MACD")
-            # 3. Harga dekat Lower BB (Buy on dip)
             if last['close'] <= last[low_bb] * 1.05: votes.append("BB")
             
             if len(votes) >= 2: return True, f"Strong: {', '.join(votes)}"
             return False, f"Weak ({len(votes)}/3)"
         except Exception as e: return False, str(e)
 
-    # --- LOGIKA UTAMA (MULTI-TASKING) ---
+    # --- LOGIKA UTAMA ---
     async def start(self, mode="MANUAL_TARGET", token_symbol=None):
         if self.is_running: return
         self.is_running = True
@@ -131,24 +135,20 @@ class SolanaAutoBot:
                 await self.logic_loop()
             except Exception as e:
                 sys_logger.add_log(f"⚠️ Loop Error: {e}")
-            await asyncio.sleep(5) # Jeda agar CPU aman
+            await asyncio.sleep(5) 
 
     def stop(self):
         self.is_running = False
         sys_logger.add_log("🛑 AUTO STOPPED")
 
     async def logic_loop(self):
-        # TUGAS 1: MONITORING (Cek semua koin yang dipegang)
         if self.active_positions:
             await self.check_all_exit_conditions()
 
-        # TUGAS 2: SCANNING (Cari koin baru jika slot masih ada)
         current_count = len(self.active_positions)
         if current_count < MAX_POSITIONS:
             if self.mode == "AUTO_DISCOVERY":
-                # Masukkan token yang sedang dipegang ke ignore list agar tidak dibeli lagi
                 held_tokens = [p['token'] for p in self.active_positions]
-                # Ignore list = token yang baru dijual + token yang sedang dipegang
                 full_ignore_list = self.recently_sold + held_tokens
                 
                 gem = await scanner.find_gem(ignore_list=full_ignore_list)
@@ -164,26 +164,22 @@ class SolanaAutoBot:
                     await asyncio.sleep(2)
             
             elif self.mode == "MANUAL_TARGET" and current_count == 0:
-                # Mode manual hanya beli 1 kali
                 await self.do_buy()
                 self.stop() 
 
     async def do_buy(self):
         sys_logger.add_log(f"⚔️ Analyzing {self.target_token}...")
 
-        # Helper untuk rotasi ignore list
         def add_to_ignore(token):
             self.recently_sold.append(token)
-            if len(self.recently_sold) > 10: self.recently_sold.pop(0)
+            if len(self.recently_sold) > 50: self.recently_sold.pop(0)
 
-        # 1. Safety Check
         is_safe, reason, _ = await safety_checker.check_token(self.target_address)
         if not is_safe:
             sys_logger.add_log(f"🛑 Unsafe: {reason}")
             if self.mode == "AUTO_DISCOVERY": add_to_ignore(self.target_token)
             return
 
-        # 2. Technical Check
         candles = await self._fetch_candles(self.target_pair_address)
         if candles is None or len(candles) < 30:
             sys_logger.add_log("⚠️ Not enough candles (<30m)")
@@ -193,12 +189,9 @@ class SolanaAutoBot:
         is_buy, tech_reason = self._technical_buy_signal(candles)
         if not is_buy:
             sys_logger.add_log(f"⏸️ Technical Skip: {tech_reason}")
-            # FIX: Jika teknikal jelek, masukkan ke ignore list agar scanner mencari yang lain
-            if self.mode == "AUTO_DISCOVERY": 
-                add_to_ignore(self.target_token) 
+            if self.mode == "AUTO_DISCOVERY": add_to_ignore(self.target_token) 
             return
 
-        # 3. Execution (Beli)
         sys_logger.add_log(f"🛒 Executing Buy: {self.target_token}")
         quote = await jupiter_bot.get_quote("SOL", self.target_token, TRADE_AMOUNT_SOL)
         
@@ -226,23 +219,32 @@ class SolanaAutoBot:
             sys_logger.add_log("❌ Swap Failed")
 
     async def check_all_exit_conditions(self):
-        # Cek setiap posisi satu per satu
         for pos in self.active_positions[:]: 
             await self.check_single_exit(pos)
 
     async def check_single_exit(self, pos):
         token = pos['token']
+        token_address = pos['address'] # Ambil address untuk cek desimal
         amount = pos['token_amount']
         
-        # Cek Harga
-        quote = await jupiter_bot.get_quote(token, "SOL", 1)
+        # --- FIX DECIMAL MISMATCH (1000x Error) ---
+        decimals = await self.get_token_decimals(token_address)
+        
+        # Jika bot handler mengira 9 desimal (standar SOL) tapi token cuma 6,
+        # kita harus menyesuaikan amount yang dikirim agar tidak dianggap 1000x lipat.
+        # Formula: Adjusted = RealAmount * (10^Decimals / 10^9)
+        adjusted_amount = amount
+        if decimals != 9:
+             adjusted_amount = amount * (10**decimals) / (10**9)
+
+        quote = await jupiter_bot.get_quote(token, "SOL", adjusted_amount)
+        
         if "error" in quote: return 
         price_per_token = float(quote['output_estimate'].replace(",", ""))
         
-        # Cegah Glitch -100% jika likuiditas belum terbaca
         if price_per_token <= 0: return 
         
-        current_value_sol = price_per_token * amount
+        current_value_sol = price_per_token # Ini adalah TOTAL SOL (karena kita minta quote all)
         initial_capital = pos['entry_price_sol']
         pnl_pct = ((current_value_sol - initial_capital) / initial_capital) * 100
         
@@ -259,21 +261,19 @@ class SolanaAutoBot:
         if should_sell:
             sys_logger.add_log(f"🚨 Selling {token}: {reason}")
             
-            full_quote = await jupiter_bot.get_quote(token, "SOL", amount)
-            if "error" in full_quote: 
-                sys_logger.add_log(f"❌ Sell Quote Error: {full_quote['error']}")
-                return
-
-            res = await jupiter_bot.execute_swap(full_quote['raw_data'])
+            # Gunakan adjusted_amount yang sama untuk eksekusi
+            # Kita perlu re-fetch quote jika logic swap handler tidak support override amount,
+            # tapi execute_swap pakai 'raw_data' dari quote di atas, jadi aman.
+            
+            res = await jupiter_bot.execute_swap(quote['raw_data'])
             
             if res.get("status") == "success":
                 sys_logger.add_log(f"✅ SOLD {token}!")
                 solana_tracker.save_trade("SELL", token, "SOL", amount, current_value_sol, status=reason)
                 self.remove_position(token)
                 
-                # Masukkan ke ignore list agar tidak terbeli lagi segera
                 self.recently_sold.append(token)
-                if len(self.recently_sold) > 10: self.recently_sold.pop(0)
+                if len(self.recently_sold) > 50: self.recently_sold.pop(0)
             else:
                 sys_logger.add_log(f"❌ Sell Fail: {res.get('message')}")
 

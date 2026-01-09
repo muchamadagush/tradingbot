@@ -17,14 +17,40 @@ def load_history():
         return []
 
 def save_trade(txid, input_token, output_token, input_amount, output_estimate, status="Success"):
-    """Menyimpan transaksi baru"""
+    """Menyimpan transaksi baru dengan deteksi BUY/SELL yang akurat"""
     history = load_history()
+    
+    # --- LOGIKA DETEKSI SIDE (BUY/SELL) ---
+    # Jika input adalah SOL/WSOL, berarti kita membeli token lain (BUY)
+    # Jika input adalah token lain, berarti kita menjual ke SOL (SELL)
+    is_buying = input_token in ["SOL", "WSOL"]
+    side = "BUY" if is_buying else "SELL"
+    
+    # --- FORMAT SYMBOL KONSISTEN: SELALU TOKEN/SOL ---
+    # Jika BUY: input=SOL, output=TOKEN → symbol = TOKEN/SOL
+    # Jika SELL: input=TOKEN, output=SOL → symbol = TOKEN/SOL
+    if is_buying:
+        token_symbol = output_token  # Kita beli token ini
+        symbol = f"{token_symbol}/SOL"
+    else:
+        token_symbol = input_token  # Kita jual token ini
+        symbol = f"{token_symbol}/SOL"
+    
+    # --- LOG CONSOLE YANG JELAS ---
+    print(f"\n{'='*60}")
+    print(f"📝 Recording Transaction: {side}")
+    print(f"   Symbol: {symbol}")
+    print(f"   In:  {input_amount:.8f} {input_token}")
+    print(f"   Out: {output_estimate:.8f} {output_token}")
+    print(f"   Status: {status}")
+    print(f"   TxID: {txid}")
+    print(f"{'='*60}\n")
     
     trade = {
         "id": f"SOL-{int(time.time())}", # ID Unik
         "timestamp": datetime.now().isoformat(),
-        "symbol": f"{output_token}/{input_token}", # Format: BONK/SOL
-        "side": "BUY",
+        "symbol": symbol,
+        "side": side,
         "price": 0, # Kita hitung nanti di frontend
         "amount_in": input_amount,
         "amount_out": output_estimate,
