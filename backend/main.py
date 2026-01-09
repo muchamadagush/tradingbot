@@ -161,15 +161,20 @@ async def get_top_liquid_coins(limit=10):
 # --- JANTUNG BOT HUNTER ---
 async def auto_trading_loop():
     global CURRENT_SCAN_TARGET
-    print("🚀 Bot Hunter Mode: ON (Brute Force)")
+    print("🚀 Bot Hunter Mode: ON (Real Execution Ready)")
     sys_logger.add_log("🚀 Bot Loop Started")
+    
+    # Load market agar simbol terupdate
     try: await exchange.load_markets()
     except: pass
 
-    TP_PERCENT = 0.015
-    SL_PERCENT = 0.03
+    # --- KONFIGURASI DASAR ---
+    TP_PERCENT = 0.015  # Take Profit 1.5%
+    SL_PERCENT = 0.03   # Stop Loss 3.0%
+    TRADE_AMOUNT_USDT = 12.0 # Modal per trade (Min $10 di Toko)
     
     while IS_BOT_RUNNING:
+        # 1. MANAGEMENT POSISI (Jual jika TP/SL)
         active_trade = get_any_active_trade()
         
         if active_trade:
@@ -178,55 +183,116 @@ async def auto_trading_loop():
             try:
                 ticker = await exchange.fetch_ticker(symbol)
                 current_price = ticker['last']
+                
+                # Analisa ulang (Opsional, bisa dihapus jika murni TP/SL)
                 signal, _, _ = await strategy.analyze_market(exchange, symbol)
                 
                 buy_price = active_trade['buy_price']
-                pnl = (current_price - buy_price) / buy_price
+                amount = active_trade['amount']
+                pnl_pct = (current_price - buy_price) / buy_price
                 
                 should_sell = False
                 reason = ""
-                if pnl > TP_PERCENT: should_sell, reason = True, "✅ TAKE PROFIT"
-                elif pnl < -SL_PERCENT: should_sell, reason = True, "🛡️ STOP LOSS"
+                
+                # Logic Penjualan
+                if pnl_pct > TP_PERCENT: should_sell, reason = True, f"✅ TAKE PROFIT (+{pnl_pct*100:.2f}%)"
+                elif pnl_pct < -SL_PERCENT: should_sell, reason = True, f"🛡️ STOP LOSS ({pnl_pct*100:.2f}%)"
                 elif signal == "SELL": should_sell, reason = True, "📉 STRATEGY SELL"
 
                 if should_sell:
-                     print(f"🔴 SELL {symbol} | {reason}")
-                     sys_logger.add_log(f"🔴 SELL {symbol} | {reason}")
-                     profit = (current_price - buy_price) * active_trade['amount']
-                     save_sell_trade(active_trade['id'], current_price, profit)
+                    print(f"🔴 EXECUTING SELL {symbol} | {reason}")
+                    sys_logger.add_log(f"🔴 SELL {symbol} | {reason}")
+                    
+                    # --- [FIX] EKSEKUSI REAL KE EXCHANGE ---
+                    if BOT_MODE == 'LIVE':
+                        try:
+                            # Kirim Order Jual ke Tokocrypto
+                            order = await exchange.create_market_sell_order(symbol, amount)
+                            sys_logger.add_log(f"✅ REAL SOLD: {order['id']}")
+                        except Exception as e:
+                            sys_logger.add_log(f"❌ SELL FAILED: {e}")
+                            # Jangan update database jika gagal jual di exchange (kecuali mau force close)
+                    
+                    # Simpan ke DB & Update Risk Manager
+                    profit_usdt = (current_price - buy_price) * amount
+                    save_sell_trade(active_trade['id'], current_price, profit_usdt)
+                    risk_manager.record_trade_pnl(profit_usdt) # Penting untuk hitung kuota rugi harian
+
                 else:
-                    print(f"👀 {symbol} PnL: {pnl*100:.2f}%")
-                    sys_logger.add_log(f"👀 {symbol} PnL: {pnl*100:.2f}%")
+                    print(f"👀 {symbol} PnL: {pnl_pct*100:.2f}%")
+            
             except Exception as e:
                  print(f"Error Managing: {e}")
-                 sys_logger.add_log(f"⚠️ Error: {e}")
             await asyncio.sleep(2)
 
+        # 2. SCANNING POSISI BARU (Beli)
         else:
+            # --- [FIX] Validasi Risk Manager Sebelum Scan ---
+            if not risk_manager.can_trade_new():
+                CURRENT_SCAN_TARGET = "Risk Limit Reached"
+                sys_logger.add_log("🛑 Daily Loss Limit Reached / Max Drawdown Hit")
+                await asyncio.sleep(60) # Istirahat 1 menit
+                continue
+
             top_coins = await get_top_liquid_coins(limit=10)
+            
             for symbol in top_coins:
                 if not IS_BOT_RUNNING: break
                 CURRENT_SCAN_TARGET = f"Analyzing {symbol}" 
+                
                 try:
+                    # Analisa Teknikal
                     signal, price, indicators = await strategy.analyze_market(exchange, symbol)
+                    
                     if signal == "BUY":
-                        print(f"🟢 FOUND GEM: {symbol}!")
-                        sys_logger.add_log(f"🟢 BUY SIGNAL: {symbol} @ ${price}")
-                        save_buy_trade(symbol, price, 100/price, 100)
-                        break 
-                    await asyncio.sleep(2.0)
+                        # Cek Saldo Real
+                        balance = await exchange.fetch_balance()
+                        usdt_balance = balance['USDT']['free']
+                        
+                        # Cek Izin Risk Manager
+                        current_positions = 0 # Karena limit 1 trade aktif
+                        risk_check = risk_manager.can_open_position(current_positions, usdt_balance, TRADE_AMOUNT_USDT)
+                        
+                        if risk_check['approved']:
+                            print(f"🟢 FOUND GEM: {symbol} @ {price}")
+                            sys_logger.add_log(f"🟢 BUY SIGNAL: {symbol}")
+                            
+                            amount_coin = TRADE_AMOUNT_USDT / price
+                            
+                            # --- [FIX] EKSEKUSI REAL KE EXCHANGE ---
+                            if BOT_MODE == 'LIVE':
+                                if usdt_balance >= TRADE_AMOUNT_USDT:
+                                    try:
+                                        # Kirim Order Beli ke Tokocrypto
+                                        order = await exchange.create_market_buy_order(symbol, amount_coin)
+                                        sys_logger.add_log(f"✅ REAL BOUGHT: {order['id']}")
+                                        
+                                        # Simpan ke DB hanya jika sukses beli
+                                        save_buy_trade(symbol, price, amount_coin, TRADE_AMOUNT_USDT)
+                                        break # Stop scanning, fokus manage posisi ini
+                                    except Exception as e:
+                                        sys_logger.add_log(f"❌ BUY FAILED: {e}")
+                                else:
+                                    sys_logger.add_log("⚠️ Saldo USDT Tidak Cukup")
+                            
+                            # MODE PAPER/TEST
+                            else:
+                                save_buy_trade(symbol, price, amount_coin, TRADE_AMOUNT_USDT)
+                                break
+                        else:
+                            print(f"🛑 Skip {symbol}: Risk Rejected ({risk_check['reasons']})")
+                    
+                    await asyncio.sleep(1.0) # Jeda antar koin
+                    
                 except Exception as e:
                     print(f"⚠️ Skip {symbol}: {e}")
-                    sys_logger.add_log(f"⚠️ Scan Error: {symbol}")
             
             CURRENT_SCAN_TARGET = "Idle"
-            sys_logger.add_log("📡 Scanning complete, ready for next cycle")
             await asyncio.sleep(3)
 
     try: await exchange.close()
     except: pass
     print("🛑 Bot Berhenti.")
-    sys_logger.add_log("🛑 Bot Loop Stopped")
 
 # ==========================================
 # ENDPOINTS API
