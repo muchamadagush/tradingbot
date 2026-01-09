@@ -331,20 +331,30 @@ async def toggle_solana_auto(request: dict):
     token = request.get("token", "USDC")
     
     if solana_auto.is_running:
-        solana_auto.stop()
-        return {"status": "stopped", "message": "Auto Stopped"}
+        # Jika mode sama, stop bot
+        if solana_auto.mode == mode:
+            solana_auto.stop()
+            return {"status": "stopped", "message": "Auto Stopped"}
+        # Jika mode berbeda, restart dengan mode baru
+        else:
+            solana_auto.stop()
+            await asyncio.sleep(0.5)  # Tunggu bot berhenti sepenuhnya
+            asyncio.create_task(solana_auto.start(mode=mode, token_symbol=token))
+            return {"status": "running", "message": f"Auto Restarted in {mode}"}
     else:
         asyncio.create_task(solana_auto.start(mode=mode, token_symbol=token))
         return {"status": "running", "message": f"Auto Started in {mode}"}
 
 @app.get("/api/solana/auto/status")
 async def get_solana_auto_status():
-    """Status Real-time Auto Bot"""
+    """Get status of Solana Auto Bot"""
     return {
         "is_running": solana_auto.is_running,
-        "target": solana_auto.target_token,
         "mode": solana_auto.mode,
-        "position": solana_auto.active_position
+        "target": solana_auto.target_token,
+        # UPDATE DI SINI: Gunakan 'positions' (plural) dan ambil list active_positions
+        "positions": solana_auto.active_positions, 
+        "count": len(solana_auto.active_positions)
     }
 
 # --- SYSTEM LOGS ---
