@@ -1,4 +1,3 @@
-# File: backend/jupiter_handler.py
 import aiohttp
 import socket
 import os
@@ -8,6 +7,7 @@ import random
 import string
 from aiohttp.resolver import DefaultResolver
 from dotenv import load_dotenv
+import sys_logger
 
 from solders.keypair import Keypair # type: ignore
 from solders.transaction import VersionedTransaction # type: ignore
@@ -31,6 +31,7 @@ TOKENS = {
 ADDRESS_TO_SYMBOL = {v: k for k, v in TOKENS.items()}
 
 TARGET_HOST = "api.jup.ag"
+# KEMBALI KE V1 (Sesuai Request)
 QUOTE_URL = f"https://{TARGET_HOST}/swap/v1/quote"
 SWAP_URL = f"https://{TARGET_HOST}/swap/v1/swap"
 
@@ -50,7 +51,6 @@ class MagicResolver(DefaultResolver):
 
 class JupiterManager:
     def __init__(self):
-        # Kita tetap pakai AsyncClient untuk SEND transaction, tapi tidak untuk READ balance
         self.rpc_client = AsyncClient(RPC_URL)
         try:
             if PRIVATE_KEY:
@@ -79,22 +79,13 @@ class JupiterManager:
         connector = aiohttp.TCPConnector(resolver=resolver, family=socket.AF_INET, ssl=False)
         return aiohttp.ClientSession(connector=connector)
 
-    # --- PERBAIKAN: MANUAL RPC CALL (ANTI ERROR LIBRARY) ---
     async def get_token_balances(self):
-        """
-        Mengambil saldo menggunakan Raw JSON-RPC.
-        Bypass error library 'solders/untagged enum'.
-        """
         if not self.payer: return {"SOL": 0}
         
         balances = {}
         pubkey_str = str(self.payer.pubkey())
-
-        # Payload untuk Request Manual
         payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTokenAccountsByOwner",
+            "jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
             "params": [
                 pubkey_str,
                 {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
@@ -103,19 +94,15 @@ class JupiterManager:
         }
 
         try:
-            # 1. Ambil Saldo SOL (Native)
-            # Kita pakai RPC Client bawaan library cuma untuk get_balance karena ini stabil
+            # 1. Ambil SOL
             sol_resp = await self.rpc_client.get_balance(self.payer.pubkey())
             balances["SOL"] = sol_resp.value / 1_000_000_000
             
-            # 2. Ambil Token SPL via Raw Request (Aiohttp)
-            # Kita tidak pakai self.rpc_client untuk ini karena sering error versioning
+            # 2. Ambil Token SPL
             async with aiohttp.ClientSession() as session:
                 async with session.post(RPC_URL, json=payload) as response:
                     if response.status == 200:
                         data = await response.json()
-                        
-                        # Parsing Manual JSON
                         if 'result' in data and 'value' in data['result']:
                             items = data['result']['value']
                             for item in items:
@@ -123,43 +110,71 @@ class JupiterManager:
                                     info = item['account']['data']['parsed']['info']
                                     mint = info['mint']
                                     amount_ui = float(info['tokenAmount']['uiAmount'] or 0)
-                                    
                                     if amount_ui > 0:
-                                        # Cek kamus simbol
                                         symbol = ADDRESS_TO_SYMBOL.get(mint, None)
                                         if symbol:
                                             balances[symbol] = amount_ui
-                                except:
-                                    continue
+                                        else:
+                                            balances[mint] = amount_ui
+                                except: continue
         except Exception as e:
             print(f"❌ Balance Error: {e}")
             if "SOL" not in balances: balances["SOL"] = 0
             
         return balances
 
-    async def get_quote(self, input_token="SOL", output_token="USDC", amount_sol=0.01):
+    async def get_quote(self, input_token="SOL", output_token="USDC", amount_sol=0.01, slippage_bps: int = 50):
         try:
-            input_mint = TOKENS.get(input_token)
-            output_mint = TOKENS.get(output_token)
+            input_mint = TOKENS.get(input_token, input_token)
+            output_mint = TOKENS.get(output_token, output_token)
+            
             if not input_mint or not output_mint: return {"error": "Token invalid"}
 
-            amount_lamport = int(float(amount_sol) * 1_000_000_000)
-            params = {"inputMint": input_mint, "outputMint": output_mint, "amount": str(amount_lamport), "slippageBps": "50"}
-            headers = {"x-api-key": API_KEY}
+            # --- FIX DESIMAL ---
+            input_decimals = 9
+            if input_token != "SOL" and input_token != "WSOL":
+                input_decimals = 6 
+                if input_token == "BONK": input_decimals = 5
+                if input_token == "USDC" or input_token == "USDT": input_decimals = 6
+            
+            amount_lamport = int(float(amount_sol) * (10 ** input_decimals))
+            
+            params = {
+                "inputMint": input_mint, 
+                "outputMint": output_mint, 
+                "amount": str(amount_lamport), 
+                "slippageBps": str(slippage_bps)
+            }
+            headers = {"x-api-key": API_KEY} if API_KEY else {}
 
             session = await self._get_session()
             async with session:
                 async with session.get(QUOTE_URL, params=params, headers=headers) as response:
                     data = await response.json()
-                    if "outAmount" not in data:
-                        return {"error": f"Jupiter: {data.get('error','Unknown')}"}
                     
-                    out_raw = int(data['outAmount'])
-                    decimals = 6
-                    if output_token == "BONK": decimals = 5 
-                    if output_token == "SOL": decimals = 9
+                    # --- SMART PARSING V1/V6 ---
+                    # V1 seringkali membungkus response dalam "data" atau "routePlan"
+                    # Kita cari 'outAmount' dimanapun dia berada
+                    quote_data = data
+                    if "data" in data and isinstance(data["data"], dict):
+                        quote_data = data["data"]
+                    elif "routePlan" in data: # Struktur lain
+                        # Jika format sangat beda, kita ambil info dasar saja jika ada
+                        pass
+
+                    if "outAmount" not in quote_data:
+                         return {"error": f"Jupiter: {data.get('error', 'Unknown Error/Format V1')}"}
                     
-                    return {"status": "success", "output_estimate": f"{(out_raw/(10**decimals)):,.4f}", "raw_data": data}
+                    out_decimals = 6
+                    if output_token == "SOL": out_decimals = 9
+                    if output_token == "BONK": out_decimals = 5
+                    
+                    out_raw = int(quote_data['outAmount'])
+                    return {
+                        "status": "success", 
+                        "output_estimate": f"{(out_raw/(10**out_decimals)):,.6f}", 
+                        "raw_data": quote_data # Return data bersih
+                    }
         except Exception as e:
             return {"error": str(e)}
 
@@ -167,30 +182,79 @@ class JupiterManager:
         if not self.payer: return {"error": "Private Key missing"}
         if IS_SIMULATION:
             return {"status": "success", "txid": f"SIMULATED_{''.join(random.choices(string.ascii_letters, k=8))}", "message": "Simulasi Berhasil"}
+        
+        # --- PANIC SELL RETRY LOGIC ---
+        async def _try_swap(quote_json):
+            try:
+                # Payload V1 mungkin beda sedikit, tapi field ini standar
+                payload = {
+                    "userPublicKey": str(self.payer.pubkey()),
+                    "quoteResponse": quote_json,
+                    # Hapus parameter V6 jika pakai V1 agar tidak error
+                    # "dynamicComputeUnitLimit": True,   
+                    # "prioritizationFeeLamports": "auto" 
+                }
+                headers = {"x-api-key": API_KEY, "Content-Type": "application/json"}
+                
+                session = await self._get_session()
+                async with session:
+                    async with session.post(SWAP_URL, json=payload, headers=headers) as response:
+                        swap_data = await response.json()
+                
+                if "swapTransaction" not in swap_data:
+                    return {"error": f"Swap Error: {swap_data}"}
+                
+                raw_tx = base64.b64decode(swap_data['swapTransaction'])
+                txn = VersionedTransaction.from_bytes(raw_tx)
+                signature = self.payer.sign_message(txn.message.to_bytes_versioned(txn.message))
+                signed_txn = VersionedTransaction.populate(txn.message, [signature])
+                
+                opts = await self.rpc_client.send_raw_transaction(bytes(signed_txn))
+                return {"status": "success", "txid": str(opts.value), "explorer_url": f"https://solscan.io/tx/{str(opts.value)}"}
+            except Exception as e:
+                return {"error": str(e)}
 
+        # Percobaan 1
+        result = await _try_swap(quote_response)
+        if result.get("status") == "success":
+            return result
+
+        # --- RETRY MODE ---
+        sys_logger.add_log(f"⚠️ Swap 1 gagal: {result.get('error')}. Memulai Panic Retry...")
+        
         try:
-            payload = {
-                "userPublicKey": str(self.payer.pubkey()),
-                "quoteResponse": quote_response,
-                "dynamicComputeUnitLimit": True, "prioritizationFeeLamports": "auto"
-            }
-            headers = {"x-api-key": API_KEY, "Content-Type": "application/json"}
+            # Parsing Safe untuk Retry
+            qr = quote_response
+            input_mint = qr.get("inputMint")
+            output_mint = qr.get("outputMint")
+            in_amount_raw = int(qr.get("inAmount"))
             
-            session = await self._get_session()
-            async with session:
-                async with session.post(SWAP_URL, json=payload, headers=headers) as response:
-                    swap_data = await response.json()
+            in_decimals = 9 if input_mint == TOKENS["SOL"] else 6
+            if input_mint == TOKENS["BONK"]: in_decimals = 5
             
-            if "swapTransaction" not in swap_data: return {"error": f"Swap Error: {swap_data}"}
+            amount_ui = in_amount_raw / (10 ** in_decimals)
+            
+            input_symbol = ADDRESS_TO_SYMBOL.get(input_mint, input_mint)
+            output_symbol = ADDRESS_TO_SYMBOL.get(output_mint, output_mint)
 
-            raw_tx = base64.b64decode(swap_data['swapTransaction'])
-            txn = VersionedTransaction.from_bytes(raw_tx)
-            signature = self.payer.sign_message(txn.message.to_bytes_versioned(txn.message))
-            signed_txn = VersionedTransaction.populate(txn.message, [signature])
-
-            opts = await self.rpc_client.send_raw_transaction(bytes(signed_txn))
-            return {"status": "success", "txid": str(opts.value), "explorer_url": f"https://solscan.io/tx/{str(opts.value)}"}
         except Exception as e:
-            return {"error": str(e)}
+            sys_logger.add_log(f"❌ Gagal prepare retry: {e}")
+            return result 
+
+        # Loop Retry Slippage
+        for slippage in [500, 1000]: 
+            sys_logger.add_log(f"🔄 Retrying with {slippage/100}% Slippage...")
+            
+            new_quote = await self.get_quote(input_symbol, output_symbol, amount_ui, slippage_bps=slippage)
+            if "error" in new_quote:
+                sys_logger.add_log(f"❌ Re-quote fail: {new_quote['error']}")
+                continue
+                
+            result_retry = await _try_swap(new_quote["raw_data"])
+            if result_retry.get("status") == "success":
+                sys_logger.add_log(f"✅ Panic Retry Success!")
+                return result_retry
+
+        return result
 
 jupiter_bot = JupiterManager()
