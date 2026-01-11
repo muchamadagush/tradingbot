@@ -216,7 +216,9 @@ class SolanaAutoBot:
             sys_logger.add_log("⚡ SNIPER: skipping candle/TA checks, rug-check passed")
 
         sys_logger.add_log(f"🛒 Executing Buy: {self.target_token} | Slippage {config['slippage_bps']/100:.2f}%")
-        quote = await jupiter_bot.get_quote("SOL", self.target_token, TRADE_AMOUNT_SOL, slippage_bps=config["slippage_bps"])
+        # Use address for new tokens not in Jupiter registry, fallback to symbol
+        buy_token_param = self.target_address if self.target_address else self.target_token
+        quote = await jupiter_bot.get_quote("SOL", buy_token_param, TRADE_AMOUNT_SOL, slippage_bps=config["slippage_bps"])
         
         if "error" in quote:
             sys_logger.add_log(f"❌ Quote Error: {quote['error']}")
@@ -261,7 +263,7 @@ class SolanaAutoBot:
         if decimals != 9:
              adjusted_amount = amount * (10**decimals) / (10**9)
 
-        quote = await jupiter_bot.get_quote(token, "SOL", adjusted_amount)
+        quote = await jupiter_bot.get_quote(token_address, "SOL", adjusted_amount)
         
         if "error" in quote: return 
         price_per_token = float(quote['output_estimate'].replace(",", ""))
