@@ -117,9 +117,9 @@ class SolanaScanner:
                         if pair_age_minutes > 5.0:
                             skipped_age += 1
                             continue
-                        # Market Cap: Harus < $50k (LEBIH MURAH untuk token umur < 2 menit)
+                        # Market Cap: Harus < $100k (lebih agresif tetapi tetap selektif)
                         if pair_age_minutes < 2.0:
-                            if fdv > 50_000:
+                            if fdv > 100_000:
                                 skipped_fdv += 1
                                 continue
                             # Likuiditas turun menjadi $200 untuk token super fresh (< 2 menit)
@@ -127,8 +127,8 @@ class SolanaScanner:
                                 skipped_liquidity += 1
                                 continue
                         else:
-                            # Untuk token 2-5 menit, FDV bisa sampai $50k, likuiditas $500
-                            if fdv > 50_000:
+                            # Untuk token 2-5 menit, FDV bisa sampai $100k, likuiditas $500
+                            if fdv > 100_000:
                                 skipped_fdv += 1
                                 continue
                             if liquidity < 500:
