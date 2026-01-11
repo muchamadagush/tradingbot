@@ -16,7 +16,7 @@ def load_history():
     except:
         return []
 
-def save_trade(txid, input_token, output_token, input_amount, output_estimate, status="Success"):
+def save_trade(txid, input_token, output_token, input_amount, output_estimate, status="Success", token_address=None):
     """Menyimpan transaksi baru dengan deteksi BUY/SELL yang akurat"""
     history = load_history()
     
@@ -54,6 +54,7 @@ def save_trade(txid, input_token, output_token, input_amount, output_estimate, s
         "price": 0, # Kita hitung nanti di frontend
         "amount_in": input_amount,
         "amount_out": output_estimate,
+        "token_address": token_address,  # Mint Address untuk verifikasi
         "txid": txid,
         "status": status,
         "source": "Jupiter"
