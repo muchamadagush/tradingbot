@@ -1,0 +1,39 @@
+name: Deploy Dev Environment
+
+# Trigger: Jalan hanya saat ada push tag yang diawali "dev_"
+on:
+  push:
+    tags:
+      - 'dev_*'  # Contoh: dev_1.0.0, dev_v2.0, dll
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
+          script: |
+            # 1. Masuk ke folder project Dev (Sesuaikan path jika beda)
+            cd ~/tradingbot-dev/tradingbot
+            
+            # 2. Stop container lama dulu (Opsional, biar bersih)
+            # docker compose down 
+            
+            # 3. Update kode dari GitHub
+            # Kita fetch semua tag, lalu checkout ke tag yang memicu deploy ini
+            git fetch --all --tags
+            git checkout ${{ github.ref_name }}
+            
+            # 4. Rebuild dan Jalankan Container
+            # Karena env var VITE_API_URL dibakar saat build, kita wajib --build
+            docker compose up --build -d
+            
+            # 5. Bersihkan image sampah (biar disk VPS gak penuh)
+            docker image prune -f
+            
+            echo "✅ Deployment Dev untuk tag ${{ github.ref_name }} Sukses!"
