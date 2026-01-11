@@ -240,6 +240,11 @@ class JupiterManager:
         # --- RETRY MODE ---
         sys_logger.add_log(f"⚠️ Swap 1 gagal: {result.get('error')}. Memulai Panic Retry...")
         
+        # Guard: quote_response must contain inputMint to proceed with retry
+        if not isinstance(quote_response, dict) or ("inputMint" not in quote_response):
+            sys_logger.add_log("❌ Retry aborted: quote_response missing inputMint")
+            return {"error": "Invalid quote_response: missing inputMint"}
+
         try:
             # Parsing Safe untuk Retry
             qr = quote_response
