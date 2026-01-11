@@ -29,8 +29,8 @@ export function PaperTradingTab() {
       setAccount(accountRes.data)
       setPositions(accountRes.data.positions_detail || [])
 
-      const tradesRes = await axios.get('${VITE_API_URL}/api/paper/trades')
-      setTrades(tradesRes.data || [])
+      const tradesRes = await axios.get(`${VITE_API_URL}/api/paper/trades`)
+      setTrades(Array.isArray(tradesRes.data) ? tradesRes.data : [])
     } catch (err) {
       console.error('Error fetching account:', err)
     }
@@ -127,39 +127,39 @@ export function PaperTradingTab() {
           <div className="grid-4">
             <div className="stat">
               <label>Balance</label>
-              <value>${account.balance.toFixed(2)}</value>
+              <div className="value">${account.balance.toFixed(2)}</div>
             </div>
             <div className="stat">
               <label>Total Equity</label>
-              <value>${account.total_equity.toFixed(2)}</value>
+              <div className="value">${account.total_equity.toFixed(2)}</div>
             </div>
             <div className="stat">
               <label>Total P&L</label>
-              <value style={{color: account.total_pnl >= 0 ? 'green' : 'red'}}>
+              <div className="value" style={{color: account.total_pnl >= 0 ? 'green' : 'red'}}>
                 ${account.total_pnl.toFixed(2)}
-              </value>
+              </div>
             </div>
             <div className="stat">
               <label>Return %</label>
-              <value style={{color: account.pnl_pct >= 0 ? 'green' : 'red'}}>
+              <div className="value" style={{color: account.pnl_pct >= 0 ? 'green' : 'red'}}>
                 {account.pnl_pct.toFixed(2)}%
-              </value>
+              </div>
             </div>
             <div className="stat">
               <label>Open Positions</label>
-              <value>{account.open_positions}</value>
+              <div className="value">{account.open_positions}</div>
             </div>
             <div className="stat">
               <label>Total Trades</label>
-              <value>{account.total_trades}</value>
+              <div className="value">{account.total_trades}</div>
             </div>
             <div className="stat">
               <label>Win Rate</label>
-              <value>{account.win_rate_pct.toFixed(1)}%</value>
+              <div className="value">{account.win_rate_pct.toFixed(1)}%</div>
             </div>
             <div className="stat">
               <label>Total Fees</label>
-              <value>${account.total_fees_paid.toFixed(2)}</value>
+              <div className="value">${account.total_fees_paid.toFixed(2)}</div>
             </div>
           </div>
 
