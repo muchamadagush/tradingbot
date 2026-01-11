@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import axios from 'axios'
 
+const VITE_API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+
 export function FeeCalculatorTab() {
   // Buy Cost
   const [buyAmount, setBuyAmount] = useState(100)
@@ -32,7 +34,7 @@ export function FeeCalculatorTab() {
     try {
       setLoading(true)
       setError('')
-      const res = await axios.post('http://127.0.0.1:8000/api/fee/calculate-buy', {
+      const res = await axios.post(`${VITE_API_URL}/api/fee/calculate-buy`, {
         amount_usdt: buyAmount,
         price: buyPrice,
         order_type: buyOrderType
@@ -49,7 +51,7 @@ export function FeeCalculatorTab() {
     try {
       setLoading(true)
       setError('')
-      const res = await axios.post('http://127.0.0.1:8000/api/fee/calculate-sell', {
+      const res = await axios.post(`${VITE_API_URL}/api/fee/calculate-sell`, {
         asset_amount: sellAmount,
         price: sellPrice,
         order_type: sellOrderType
@@ -66,7 +68,7 @@ export function FeeCalculatorTab() {
     try {
       setLoading(true)
       setError('')
-      const res = await axios.post('http://127.0.0.1:8000/api/fee/round-trip', {
+      const res = await axios.post(`${VITE_API_URL}/api/fee/round-trip`, {
         amount_usdt: rtAmount,
         price: rtPrice
       })
@@ -82,7 +84,7 @@ export function FeeCalculatorTab() {
     try {
       setLoading(true)
       setError('')
-      const res = await axios.post('http://127.0.0.1:8000/api/fee/profit-target', {
+      const res = await axios.post(`${VITE_API_URL}/api/fee/profit-target`, {
         buy_price: ptBuyPrice,
         amount: ptAmount,
         target_profit_pct: ptTarget

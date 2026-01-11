@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import axios from 'axios'
 
+const VITE_API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+
 export function BacktestingTab() {
   const [symbol, setSymbol] = useState('BTC/USDT')
   const [timeframe, setTimeframe] = useState('1h')
@@ -20,7 +22,7 @@ export function BacktestingTab() {
 
   const fetchBacktestHistory = async () => {
     try {
-      const res = await axios.get('http://127.0.0.1:8000/api/backtest/history?limit=20')
+      const res = await axios.get(`${VITE_API_URL}/api/backtest/history?limit=20`)
       setHistory(res.data)
     } catch (err) {
       console.error('Error fetching history:', err)
@@ -33,7 +35,7 @@ export function BacktestingTab() {
       setError(null)
       setResult(null)
 
-      const res = await axios.post('http://127.0.0.1:8000/api/backtest/run', {
+      const res = await axios.post(`${VITE_API_URL}/api/backtest/run`, {
         symbol,
         timeframe,
         days_back: daysBack,

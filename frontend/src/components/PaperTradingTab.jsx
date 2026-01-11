@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import axios from 'axios'
 
+const VITE_API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+
 export function PaperTradingTab() {
   const [account, setAccount] = useState(null)
   const [positions, setPositions] = useState([])
@@ -23,11 +25,11 @@ export function PaperTradingTab() {
 
   const fetchAccountData = async () => {
     try {
-      const accountRes = await axios.get('http://127.0.0.1:8000/api/paper/account')
+      const accountRes = await axios.get(`${VITE_API_URL}/api/paper/account`)
       setAccount(accountRes.data)
       setPositions(accountRes.data.positions_detail || [])
 
-      const tradesRes = await axios.get('http://127.0.0.1:8000/api/paper/trades')
+      const tradesRes = await axios.get('${VITE_API_URL}/api/paper/trades')
       setTrades(tradesRes.data || [])
     } catch (err) {
       console.error('Error fetching account:', err)
@@ -37,7 +39,7 @@ export function PaperTradingTab() {
   const fetchPrice = async (sym) => {
     try {
       const cleanSym = sym.replace('/', '')
-      const res = await axios.get(`http://127.0.0.1:8000/api/toko/price/${cleanSym}`)
+      const res = await axios.get(`${VITE_API_URL}/api/toko/price/${cleanSym}`)
       setCurrentPrice(res.data.current_price)
       setError('')
     } catch (err) {
@@ -53,7 +55,7 @@ export function PaperTradingTab() {
 
       await fetchPrice(symbol)
 
-      const res = await axios.post('http://127.0.0.1:8000/api/paper/buy', {
+      const res = await axios.post(`${VITE_API_URL}/api/paper/buy`, {
         symbol,
         amount_usdt: amount
       })
@@ -80,7 +82,7 @@ export function PaperTradingTab() {
       setMessage('')
       setError('')
 
-      const res = await axios.post('http://127.0.0.1:8000/api/paper/sell', {
+      const res = await axios.post(`${VITE_API_URL}/api/paper/sell`, {
         symbol: sym,
         percentage: 100
       })
@@ -103,7 +105,7 @@ export function PaperTradingTab() {
   const handleReset = async () => {
     if (window.confirm('Reset paper account to $1000?')) {
       try {
-        await axios.post('http://127.0.0.1:8000/api/paper/reset', {
+        await axios.post(`${VITE_API_URL}/api/paper/reset`, {
           balance: 1000
         })
         setMessage('✅ Account reset to $1000')

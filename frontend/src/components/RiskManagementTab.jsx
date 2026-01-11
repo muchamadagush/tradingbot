@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import axios from 'axios'
 
+const VITE_API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+
 export function RiskManagementTab() {
   // Position Sizing
   const [psCapital, setPsCapital] = useState(1000)
@@ -24,7 +26,7 @@ export function RiskManagementTab() {
     try {
       setLoading(true)
       setError('')
-      const res = await axios.post('http://127.0.0.1:8000/api/risk/position-size', {
+      const res = await axios.post(`${VITE_API_URL}/api/risk/position-size`, {
         capital: psCapital,
         entry_price: psEntryPrice,
         stop_loss_price: psStopLoss
@@ -41,7 +43,7 @@ export function RiskManagementTab() {
     try {
       setLoading(true)
       setError('')
-      const res = await axios.post('http://127.0.0.1:8000/api/risk/kelly', {
+      const res = await axios.post(`${VITE_API_URL}/api/risk/kelly`, {
         win_rate: kellyWinRate,
         avg_win: kellyAvgWin,
         avg_loss: kellyAvgLoss
@@ -57,7 +59,7 @@ export function RiskManagementTab() {
   const fetchRiskSummary = async () => {
     try {
       setLoading(true)
-      const res = await axios.get('http://127.0.0.1:8000/api/risk/summary')
+      const res = await axios.get(`${VITE_API_URL}/api/risk/summary`)
       setRiskSummary(res.data)
     } catch (err) {
       setError('Failed to fetch risk summary')

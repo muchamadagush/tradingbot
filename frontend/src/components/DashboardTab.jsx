@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import axios from 'axios'
 
+const VITE_API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+
 export function DashboardTab() {
   const [botMode, setBotMode] = useState(null)
   const [riskSummary, setRiskSummary] = useState(null)
@@ -22,20 +24,20 @@ export function DashboardTab() {
 
   const fetchDashboard = async () => {
     try {
-      const modeRes = await axios.get('http://127.0.0.1:8000/api/bot/mode')
+      const modeRes = await axios.get(`${VITE_API_URL}/api/bot/mode`)
       setBotMode(modeRes.data)
 
-      const tokoRes = await axios.get('http://127.0.0.1:8000/api/bot/status')
+      const tokoRes = await axios.get(`${VITE_API_URL}/api/bot/status`)
       setTokoStatus(tokoRes.data)
 
-      const solanaRes = await axios.get('http://127.0.0.1:8000/api/solana/auto/status')
+      const solanaRes = await axios.get(`${VITE_API_URL}/api/solana/auto/status`)
       setSolanaStatus(solanaRes.data)
 
-      const riskRes = await axios.get('http://127.0.0.1:8000/api/risk/summary')
+      const riskRes = await axios.get(`${VITE_API_URL}/api/risk/summary`)
       setRiskSummary(riskRes.data)
 
       if (modeRes.data.mode === 'PAPER') {
-        const accountRes = await axios.get('http://127.0.0.1:8000/api/paper/account')
+        const accountRes = await axios.get(`${VITE_API_URL}/api/paper/account`)
         setPaperAccount(accountRes.data)
       }
       setError(null)
@@ -54,7 +56,7 @@ export function DashboardTab() {
 
   const toggleTokoBot = async () => {
     try {
-      await axios.post('http://127.0.0.1:8000/api/bot/toggle')
+      await axios.post(`${VITE_API_URL}/api/bot/toggle`)
       fetchDashboard()
     } catch (err) {
       alert("Gagal toggle Toko Bot: " + err.message)
@@ -63,7 +65,7 @@ export function DashboardTab() {
 
   const toggleSolanaBot = async () => {
     try {
-      await axios.post('http://127.0.0.1:8000/api/solana/auto/toggle', {
+      await axios.post(`${VITE_API_URL}/api/solana/auto/toggle`, {
         mode: solanaMode,
         token: "USDC" 
       })
