@@ -1,29 +1,28 @@
 version: '3.8'
 
 services:
-  # --- SERVICE BACKEND ---
   backend:
     build: ./backend
-    container_name: solana-bot-backend
+    container_name: solana-backend-dev
     restart: always
     ports:
-      - "8000:8000"
-    # Mapping file agar data tidak hilang saat container restart
+      - "8000:8000"  # Sesuai request (Backend Port 8000)
+    env_file:
+      - ./backend/.env
     volumes:
       - ./backend/solana_trades.json:/app/solana_trades.json
       - ./backend/solana_positions.json:/app/solana_positions.json
       - ./backend/paper_trading_state.json:/app/paper_trading_state.json
       - ./backend/logs:/app/logs
-    # Environment variable (API Key, dll)
-    env_file:
-      - ./backend/.env
 
-  # --- SERVICE FRONTEND ---
   frontend:
     build: ./frontend
-    container_name: solana-bot-frontend
+    container_name: solana-frontend-dev
     restart: always
     ports:
-      - "80:80"  # Akses VPS langsung tanpa port (http://ip-vps)
+      - "3001:80"   # Host 3001 -> Container 80 (Agar tidak bentrok dengan Nginx Host)
+    environment:
+      # PENTING: Variabel ini akan dibakar saat build
+      - VITE_API_URL=https://dev-tradingbot.iamagus.com
     depends_on:
       - backend
