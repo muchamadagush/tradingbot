@@ -17,15 +17,27 @@ import sys_logger
 import strategy
 
 POSITIONS_FILE = "solana_positions.json"
-TAKE_PROFIT_PCT = 100.0   # Target Profit
-STOP_LOSS_PCT = -40.0    # Stop Loss
 TRADE_AMOUNT_SOL = 0.015  # Jumlah SOL per trade
 MAX_POSITIONS = 10  # Maksimal posisi bersamaan
+
+STRATEGY_RULES = {
+    "SNIPER": {
+        "tp_pct": 200.0,   # +200%
+        "sl_pct": -50.0,   # -50%
+        "slippage_bps": 2000  # 20%
+    },
+    "TRADER": {
+        "tp_pct": 20.0,    # +20%
+        "sl_pct": -10.0,   # -10%
+        "slippage_bps": 100  # 1%
+    }
+}
 
 class SolanaAutoBot:
     def __init__(self):
         self.is_running = False
         self.mode = "MANUAL_TARGET"
+        self.strategy = "TRADER"
         self.target_token = "USDC"
         self.target_address = None
         self.target_pair_address = None
@@ -63,6 +75,10 @@ class SolanaAutoBot:
     def remove_position(self, token_symbol):
         self.active_positions = [p for p in self.active_positions if p['token'] != token_symbol]
         self.save_positions()
+
+    def _get_strategy_config(self, strategy_name=None):
+        name = (strategy_name or self.strategy or "TRADER").upper()
+        return STRATEGY_RULES.get(name, STRATEGY_RULES["TRADER"])
 
     # --- HELPER: GET DECIMALS (FIX PNL BUG) ---
     async def get_token_decimals(self, address: str):
@@ -124,11 +140,13 @@ class SolanaAutoBot:
         except Exception as e: return False, str(e)
 
     # --- LOGIKA UTAMA ---
-    async def start(self, mode="MANUAL_TARGET", token_symbol=None):
+    async def start(self, mode="MANUAL_TARGET", token_symbol=None, strategy="TRADER"):
         if self.is_running: return
         self.is_running = True
         self.mode = mode
-        sys_logger.add_log(f"🚀 AUTO STARTED: {mode} (Max {MAX_POSITIONS} slots)")
+        self.strategy = (strategy or "TRADER").upper()
+        if token_symbol: self.target_token = token_symbol
+        sys_logger.add_log(f"🚀 AUTO STARTED: {mode} | Strategy: {self.strategy} (Max {MAX_POSITIONS} slots)")
         
         while self.is_running:
             try:
@@ -151,7 +169,7 @@ class SolanaAutoBot:
                 held_tokens = [p['token'] for p in self.active_positions]
                 full_ignore_list = self.recently_sold + held_tokens
                 
-                gem = await scanner.find_gem(ignore_list=full_ignore_list)
+                gem = await scanner.find_gem(ignore_list=full_ignore_list, mode=self.strategy)
                 
                 if gem:
                     self.target_token = gem['symbol']
@@ -168,7 +186,9 @@ class SolanaAutoBot:
                 self.stop() 
 
     async def do_buy(self):
-        sys_logger.add_log(f"⚔️ Analyzing {self.target_token}...")
+        strategy_name = self.strategy
+        config = self._get_strategy_config()
+        sys_logger.add_log(f"⚔️ Analyzing {self.target_token} | Strategy: {strategy_name}")
 
         def add_to_ignore(token):
             self.recently_sold.append(token)
@@ -180,20 +200,23 @@ class SolanaAutoBot:
             if self.mode == "AUTO_DISCOVERY": add_to_ignore(self.target_token)
             return
 
-        candles = await self._fetch_candles(self.target_pair_address)
-        if candles is None or len(candles) < 30:
-            sys_logger.add_log("⚠️ Not enough candles (<30m)")
-            if self.mode == "AUTO_DISCOVERY": add_to_ignore(self.target_token)
-            return
-            
-        is_buy, tech_reason = self._technical_buy_signal(candles)
-        if not is_buy:
-            sys_logger.add_log(f"⏸️ Technical Skip: {tech_reason}")
-            if self.mode == "AUTO_DISCOVERY": add_to_ignore(self.target_token) 
-            return
+        if strategy_name == "TRADER":
+            candles = await self._fetch_candles(self.target_pair_address)
+            if candles is None or len(candles) < 30:
+                sys_logger.add_log("⚠️ Not enough candles (<30m)")
+                if self.mode == "AUTO_DISCOVERY": add_to_ignore(self.target_token)
+                return
+                
+            is_buy, tech_reason = self._technical_buy_signal(candles)
+            if not is_buy:
+                sys_logger.add_log(f"⏸️ Technical Skip: {tech_reason}")
+                if self.mode == "AUTO_DISCOVERY": add_to_ignore(self.target_token) 
+                return
+        else:
+            sys_logger.add_log("⚡ SNIPER: skipping candle/TA checks, rug-check passed")
 
-        sys_logger.add_log(f"🛒 Executing Buy: {self.target_token}")
-        quote = await jupiter_bot.get_quote("SOL", self.target_token, TRADE_AMOUNT_SOL)
+        sys_logger.add_log(f"🛒 Executing Buy: {self.target_token} | Slippage {config['slippage_bps']/100:.2f}%")
+        quote = await jupiter_bot.get_quote("SOL", self.target_token, TRADE_AMOUNT_SOL, slippage_bps=config["slippage_bps"])
         
         if "error" in quote:
             sys_logger.add_log(f"❌ Quote Error: {quote['error']}")
@@ -209,11 +232,12 @@ class SolanaAutoBot:
                 "address": self.target_address,
                 "entry_price_sol": TRADE_AMOUNT_SOL,
                 "token_amount": output_amount,
+                "strategy": strategy_name,
                 "txid": result['txid'],
                 "timestamp": time.time()
             }
             self.add_position(pos)
-            solana_tracker.save_trade(result['txid'], "SOL", self.target_token, TRADE_AMOUNT_SOL, output_amount)
+            solana_tracker.save_trade(result['txid'], "SOL", self.target_token, TRADE_AMOUNT_SOL, output_amount, token_address=self.target_address)
             sys_logger.add_log(f"✅ BOUGHT {self.target_token}! Holding {len(self.active_positions)}/{MAX_POSITIONS}.")
         else:
             sys_logger.add_log("❌ Swap Failed")
@@ -248,15 +272,18 @@ class SolanaAutoBot:
         initial_capital = pos['entry_price_sol']
         pnl_pct = ((current_value_sol - initial_capital) / initial_capital) * 100
         
+        pos_strategy = (pos.get("strategy") or self.strategy or "TRADER").upper()
+        cfg = self._get_strategy_config(pos_strategy)
+
         should_sell = False
         reason = ""
         
-        if pnl_pct >= TAKE_PROFIT_PCT:
+        if pnl_pct >= cfg["tp_pct"]:
             should_sell = True
-            reason = f"✅ TP Hit (+{pnl_pct:.2f}%)"
-        elif pnl_pct <= STOP_LOSS_PCT:
+            reason = f"✅ TP Hit {pos_strategy} (+{pnl_pct:.2f}%)"
+        elif pnl_pct <= cfg["sl_pct"]:
             should_sell = True
-            reason = f"❌ SL Hit ({pnl_pct:.2f}%)"
+            reason = f"❌ SL Hit {pos_strategy} ({pnl_pct:.2f}%)"
         
         if should_sell:
             sys_logger.add_log(f"🚨 Selling {token}: {reason}")
@@ -269,7 +296,7 @@ class SolanaAutoBot:
             
             if res.get("status") == "success":
                 sys_logger.add_log(f"✅ SOLD {token}!")
-                solana_tracker.save_trade("SELL", token, "SOL", amount, current_value_sol, status=reason)
+                solana_tracker.save_trade("SELL", token, "SOL", amount, current_value_sol, status=reason, token_address=token_address)
                 self.remove_position(token)
                 
                 self.recently_sold.append(token)

@@ -373,12 +373,15 @@ async def execute_solana_swap(request: SwapRequest):
     result = await jupiter_bot.execute_swap(quote['raw_data'])
     
     if "status" in result and result["status"] == "success":
+        # Untuk manual swap, kita cari mint address dari output_token
+        token_address = TOKENS.get(request.output_token, request.output_token) if request.input_token == "SOL" else TOKENS.get(request.input_token, request.input_token)
         solana_tracker.save_trade(
             txid=result.get("txid", "UNKNOWN"),
             input_token=request.input_token,
             output_token=request.output_token,
             input_amount=request.amount,
-            output_estimate=quote.get("output_estimate", 0)
+            output_estimate=quote.get("output_estimate", 0),
+            token_address=token_address
         )
     
     return result
@@ -395,21 +398,25 @@ async def toggle_solana_auto(request: dict):
     """Saklar untuk Menyalakan/Mematikan Auto Bot"""
     mode = request.get("mode", "MANUAL_TARGET") 
     token = request.get("token", "USDC")
+    strategy = request.get("strategy", "TRADER")
+    strategy = strategy.upper() if isinstance(strategy, str) else "TRADER"
+    if strategy not in ("SNIPER", "TRADER"):
+        strategy = "TRADER"
     
     if solana_auto.is_running:
-        # Jika mode sama, stop bot
-        if solana_auto.mode == mode:
+        # Jika mode & strategi sama, stop bot
+        if solana_auto.mode == mode and solana_auto.strategy == strategy:
             solana_auto.stop()
             return {"status": "stopped", "message": "Auto Stopped"}
         # Jika mode berbeda, restart dengan mode baru
         else:
             solana_auto.stop()
             await asyncio.sleep(0.5)  # Tunggu bot berhenti sepenuhnya
-            asyncio.create_task(solana_auto.start(mode=mode, token_symbol=token))
-            return {"status": "running", "message": f"Auto Restarted in {mode}"}
+            asyncio.create_task(solana_auto.start(mode=mode, token_symbol=token, strategy=strategy))
+            return {"status": "running", "message": f"Auto Restarted in {mode} ({strategy})"}
     else:
-        asyncio.create_task(solana_auto.start(mode=mode, token_symbol=token))
-        return {"status": "running", "message": f"Auto Started in {mode}"}
+        asyncio.create_task(solana_auto.start(mode=mode, token_symbol=token, strategy=strategy))
+        return {"status": "running", "message": f"Auto Started in {mode} ({strategy})"}
 
 @app.get("/api/solana/auto/status")
 async def get_solana_auto_status():
@@ -417,6 +424,7 @@ async def get_solana_auto_status():
     return {
         "is_running": solana_auto.is_running,
         "mode": solana_auto.mode,
+        "strategy": solana_auto.strategy,
         "target": solana_auto.target_token,
         # UPDATE DI SINI: Gunakan 'positions' (plural) dan ambil list active_positions
         "positions": solana_auto.active_positions, 
