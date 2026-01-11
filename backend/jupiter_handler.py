@@ -5,6 +5,7 @@ import base64
 import json
 import random
 import string
+from typing import Optional
 from aiohttp.resolver import DefaultResolver
 from dotenv import load_dotenv
 import sys_logger
@@ -121,14 +122,23 @@ class JupiterManager:
             print(f"❌ Balance Error: {e}")
             if "SOL" not in balances: balances["SOL"] = 0
             
-        return balances
-
-    async def get_quote(self, input_token="SOL", output_token="USDC", amount_sol=0.01, slippage_bps: int = 50):
+            return balances
+    
+    async def get_quote(self, input_token="SOL", output_token="USDC", amount_sol=0.01, slippage_bps=50):
         try:
-            input_mint = TOKENS.get(input_token, input_token)
-            output_mint = TOKENS.get(output_token, output_token)
+            # --- LOGIKA BARU: Cek Kamus Dulu, Kalau Tidak Ada Anggap Itu Address ---
+            # Cek apakah input_token ada di kamus TOKENS, jika tidak, cek apakah panjang stringnya > 10 (asumsi address)
+            input_mint = TOKENS.get(input_token)
+            if not input_mint and len(input_token) > 10:
+                input_mint = input_token
             
-            if not input_mint or not output_mint: return {"error": "Token invalid"}
+            output_mint = TOKENS.get(output_token)
+            if not output_mint and len(output_token) > 10:
+                output_mint = output_token
+            # -----------------------------------------------------------------------
+
+            if not input_mint: return {"error": f"Token {input_token} invalid/not found"}
+            if not output_mint: return {"error": f"Token {output_token} invalid/not found"}
 
             # --- FIX DESIMAL ---
             input_decimals = 9
@@ -139,11 +149,19 @@ class JupiterManager:
             
             amount_lamport = int(float(amount_sol) * (10 ** input_decimals))
             
+            effective_slippage = slippage_bps
+            if effective_slippage is None:
+                # Default ke env jika tersedia, fallback 50 bps (0.5%)
+                try:
+                    effective_slippage = int(os.getenv("JUPITER_DEFAULT_SLIPPAGE_BPS", "50"))
+                except:  # pragma: no cover - fallback aman
+                    effective_slippage = 50
+
             params = {
                 "inputMint": input_mint, 
                 "outputMint": output_mint, 
                 "amount": str(amount_lamport), 
-                "slippageBps": str(slippage_bps)
+                "slippageBps": str(effective_slippage)
             }
             headers = {"x-api-key": API_KEY} if API_KEY else {}
 
