@@ -9,10 +9,17 @@ COPY . .
 # Build production code
 RUN npm run build
 
-# Stage 2: Serve dengan Nginx (Ringan & Cepat)
+# Stage 2: Serve with Nginx
 FROM nginx:alpine
-# Copy hasil build dari Stage 1 ke folder Nginx
+
+# Delete default config
+RUN rm /etc/nginx/conf.d/default.conf
+
+# Copy custom config
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Copy build artifacts
 COPY --from=builder /app/dist /usr/share/nginx/html
-# Config default Nginx
+
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
