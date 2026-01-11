@@ -16,6 +16,7 @@ from risk_manager import RiskManager, RiskLimits
 # --- IMPORT MODUL PENTING ---
 from jupiter_handler import jupiter_bot
 from solana_auto import solana_auto  # <--- WAJIB ADA AGAR TIDAK ERROR
+import analytics  # <--- Import Analytics Module
 
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -794,3 +795,103 @@ def get_bot_mode():
             "BACKTEST": "Historical data testing"
         }.get(BOT_MODE, "Unknown")
     }
+
+# ==========================================
+# 🆕 ANALYTICS ENDPOINTS
+# ==========================================
+
+@app.get("/api/analytics/solana")
+def get_solana_analytics(
+    start_date: str = None,
+    end_date: str = None,
+    timeframe: str = "daily"
+):
+    """
+    Get Solana trading analytics with profit/loss calculations
+    
+    Query Parameters:
+        - start_date: ISO format (YYYY-MM-DD) - optional
+        - end_date: ISO format (YYYY-MM-DD) - optional
+        - timeframe: 'daily' (default), 'weekly', 'monthly', 'yearly'
+    
+    Returns:
+        {
+            "data": [
+                {
+                    "date": "2024-01-01",
+                    "profit_sol": 0.5,
+                    "profit_usd": 100,
+                    "cumulative_profit_sol": 0.5,
+                    "cumulative_profit_usd": 100
+                },
+                ...
+            ],
+            "summary": {
+                "total_profit_sol": 5.0,
+                "total_profit_usd": 1000.0,
+                "total_loss_sol": -2.0,
+                "total_loss_usd": -400.0,
+                "net_profit_sol": 3.0,
+                "net_profit_usd": 600.0,
+                "total_trades": 20,
+                "winning_trades": 15,
+                "losing_trades": 5,
+                "win_rate": 75.0
+            }
+        }
+    """
+    # Get current SOL price (default 200, should be fetched from API)
+    sol_price = 200.0
+    
+    result = analytics.calculate_solana_analytics(
+        start_date=start_date,
+        end_date=end_date,
+        timeframe=timeframe,
+        sol_to_usd=sol_price
+    )
+    
+    return result
+
+
+@app.get("/api/analytics/tokocrypto")
+def get_tokocrypto_analytics(
+    start_date: str = None,
+    end_date: str = None,
+    timeframe: str = "daily"
+):
+    """
+    Get Tokocrypto trading analytics with profit/loss calculations
+    
+    Query Parameters:
+        - start_date: ISO format (YYYY-MM-DD) - optional
+        - end_date: ISO format (YYYY-MM-DD) - optional
+        - timeframe: 'daily' (default), 'weekly', 'monthly', 'yearly'
+    
+    Returns:
+        {
+            "data": [
+                {
+                    "date": "2024-01-01",
+                    "profit_usdt": 100,
+                    "cumulative_profit": 100
+                },
+                ...
+            ],
+            "summary": {
+                "total_profit_usdt": 500,
+                "total_loss_usdt": -200,
+                "net_profit_usdt": 300,
+                "total_trades": 20,
+                "winning_trades": 15,
+                "losing_trades": 5,
+                "win_rate": 75.0
+            }
+        }
+    """
+    result = analytics.calculate_tokocrypto_analytics(
+        start_date=start_date,
+        end_date=end_date,
+        timeframe=timeframe
+    )
+    
+    return result

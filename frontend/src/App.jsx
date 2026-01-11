@@ -6,6 +6,7 @@ import { BacktestingTab } from './components/BacktestingTab'
 import { PaperTradingTab } from './components/PaperTradingTab'
 import { RiskManagementTab } from './components/RiskManagementTab'
 import { FeeCalculatorTab } from './components/FeeCalculatorTab'
+import AnalyticsTab from './components/AnalyticsTab'
 
 const VITE_API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 
@@ -146,7 +147,8 @@ function App() {
     { id: 'backtest', label: '📊 Backtesting', icon: '📈' },
     { id: 'paper', label: '📄 Paper Trading', icon: '💼' },
     { id: 'risk', label: '⚠️ Risk Manager', icon: '🔒' },
-    { id: 'fees', label: '💰 Fee Calculator', icon: '💵' }
+    { id: 'fees', label: '💰 Fee Calculator', icon: '💵' },
+    { id: 'analytics', label: '📈 Analytics', icon: '📉' }
   ]
 
   return (
@@ -382,6 +384,7 @@ function App() {
       {activeTab === 'paper' && <PaperTradingTab />}
       {activeTab === 'risk' && <RiskManagementTab />}
       {activeTab === 'fees' && <FeeCalculatorTab />}
+      {activeTab === 'analytics' && <AnalyticsTab />}
     </div>
   )
 }
