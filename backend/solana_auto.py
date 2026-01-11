@@ -250,7 +250,8 @@ class SolanaAutoBot:
 
     async def check_single_exit(self, pos):
         token = pos['token']
-        token_address = pos['address'] # Ambil address untuk cek desimal
+        # Use address as priority, fallback to token symbol if address not available
+        token_address = pos.get('address') or pos['token']
         amount = pos['token_amount']
         
         # --- FIX DECIMAL MISMATCH (1000x Error) ---
@@ -263,6 +264,8 @@ class SolanaAutoBot:
         if decimals != 9:
              adjusted_amount = amount * (10**decimals) / (10**9)
 
+           # Use token_address for quote (address > symbol fallback)
+           # This ensures new tokens not in Jupiter registry can still be quoted after restart
         quote = await jupiter_bot.get_quote(token_address, "SOL", adjusted_amount)
         
         if "error" in quote: return 
