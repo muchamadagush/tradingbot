@@ -18,8 +18,11 @@ aiohttp==3.9.1
 solders==0.18.0
 solana==0.30.2
 
-# Database
-sqlite3  # Built-in with Python
+# HTTP Requests
+requests==2.31.0
+
+# Technical Analysis
+pandas_ta==0.3.14b0
 
 # Optional: For advanced analysis
 # ta-lib==0.4.28  # Technical Analysis Library (optional)

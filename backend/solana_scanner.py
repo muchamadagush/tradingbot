@@ -4,8 +4,7 @@ import asyncio
 import time
 import sys_logger 
 
-# STRATEGI BARU: Latest Token Profiles (Fokus pada Token Fresh)
-# Endpoint untuk mendapatkan profil token terbaru yang sudah diverifikasi
+# STRATEGI BARU: Latest Token Profiles (Fokus pada Token Fresh & Trending)
 PROFILES_API = "https://api.dexscreener.com/token-profiles/latest/v1"
 TOKENS_API = "https://api.dexscreener.com/latest/dex/tokens/"
 WSOL_ADDRESS = "So11111111111111111111111111111111111111112"
@@ -20,7 +19,7 @@ class SolanaScanner:
         headers = { "User-Agent": "Mozilla/5.0" }
         
         # Blacklist koin stabil/raksasa agar tidak salah beli
-        BLACKLIST_SYMBOLS = ['USDC', 'USDT', 'USDH', 'UXD', 'PAI', 'SOL', 'WSOL', 'USD1', 'USDS', 'MSOL', 'JITOSOL']
+        BLACKLIST_SYMBOLS = ['USDC', 'USDT', 'USDH', 'UXD', 'PAI', 'SOL', 'WSOL', 'USD1', 'USDS', 'MSOL', 'JITOSOL', 'JUP', 'RAY']
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -63,7 +62,7 @@ class SolanaScanner:
                 # === LANGKAH 4: FINAL FILTERING ===
                 candidates = []
                 
-                # Counter untuk Debugging Log
+                # Counter untuk Debugging Log (Dijaga agar tidak hilang)
                 skipped_quote = 0
                 skipped_age = 0
                 skipped_fdv = 0
@@ -71,6 +70,7 @@ class SolanaScanner:
                 skipped_ignore = 0
                 skipped_liquidity = 0
                 skipped_volume = 0
+                skipped_trend = 0  # Counter baru untuk trend
                 
                 now_ms = int(time.time() * 1000)
                 
@@ -80,9 +80,7 @@ class SolanaScanner:
                     
                     base = p.get('baseToken', {})
                     quote = p.get('quoteToken', {})
-                    
-                    # Ambil Pair Address (Penting untuk fetch candle nanti)
-                    pair_address = p.get('pairAddress')
+                    pair_address = p.get('pairAddress') # Penting
                     
                     # 2. Cek Quote Token (HARUS SOL/WSOL)
                     if quote.get('address') != WSOL_ADDRESS:
@@ -100,7 +98,7 @@ class SolanaScanner:
                         skipped_ignore += 1
                         continue
 
-                    # 4. Ambil Data Metrik
+                    # 4. Ambil Data Metrik (Ditambah Metric Baru)
                     pair_created_at = p.get('pairCreatedAt') or 0
                     pair_age_ms = now_ms - pair_created_at if pair_created_at else 0
                     pair_age_hours = pair_age_ms / 3_600_000
@@ -108,46 +106,50 @@ class SolanaScanner:
                     
                     liquidity = float(p.get('liquidity', {}).get('usd', 0))
                     volume_24h = float(p.get('volume', {}).get('h24', 0))
+                    volume_h1 = float(p.get('volume', {}).get('h1', 0)) # Metric Baru
                     fdv = float(p.get('fdv', 0) or 0)
+                    price_change_h1 = float(p.get('priceChange', {}).get('h1', 0)) # Metric Baru (Trend)
                     
-                    # 5. LOGIKA FILTER BERDASARKAN MODE
+                    # 5. LOGIKA FILTER BERDASARKAN MODE (UPDATED STRATEGY)
                     if mode == "SNIPER":
-                        # --- MODE SNIPER (AGGRESSIVE - Cari Bayi Baru) ---
-                        # Umur: Harus < 5 menit (LEBIH AGRESIF)
-                        if pair_age_minutes > 5.0:
+                        # --- MODE SNIPER (Updated: Lebih Aman) ---
+                        # Umur: Maksimal 15 menit (Jangan terlalu bayi < 2 menit, terlalu berisiko rugpull)
+                        if pair_age_minutes > 15.0:
                             skipped_age += 1
                             continue
-                        # Market Cap: Harus < $100k (lebih agresif tetapi tetap selektif)
-                        if pair_age_minutes < 2.0:
-                            if fdv > 100_000:
-                                skipped_fdv += 1
-                                continue
-                            # Likuiditas turun menjadi $200 untuk token super fresh (< 2 menit)
-                            if liquidity < 200:
-                                skipped_liquidity += 1
-                                continue
-                        else:
-                            # Untuk token 2-5 menit, FDV bisa sampai $100k, likuiditas $500
-                            if fdv > 100_000:
-                                skipped_fdv += 1
-                                continue
-                            if liquidity < 500:
-                                skipped_liquidity += 1
-                                continue
-                            
-                    else:
-                        # --- MODE TRADER (Cari Volume) ---
-                        # Umur: Bebas (asal valid profile), tapi kita skip yang baru lahir < 1 jam biar aman
-                        if pair_age_hours < 1.0:
-                            skipped_age += 1
-                            continue
-                        # Likuiditas: Minimal $10,000 (Lebih tebal)
-                        if liquidity < 10_000:
+                        
+                        # Likuiditas: Minimal $2,000 (Dinaikkan dari $200 agar bisa jual)
+                        if liquidity < 2000:
                             skipped_liquidity += 1
                             continue
-                        # Volume: Minimal $10,000 (Harus aktif)
-                        if volume_24h < 10_000:
+                            
+                        # FDV: Maksimal $500k (Cari koin micin potensial)
+                        if fdv > 500_000:
+                            skipped_fdv += 1
+                            continue
+                            
+                    else:
+                        # --- MODE TRADER (Updated: Alpha Hunter) ---
+                        # Strategi: Cari Momentum & Uptrend
+                        
+                        # 1. Anti Bayi Prematur: Umur minimal 30 Menit
+                        if pair_age_minutes < 30.0:
+                            skipped_age += 1
+                            continue
+                            
+                        # 2. Anti Rugpull: Likuiditas Minimal $5,000
+                        if liquidity < 5000:
+                            skipped_liquidity += 1
+                            continue
+                            
+                        # 3. Anti Koin Sepi: Volume 1 Jam minimal $5,000
+                        if volume_h1 < 5000:
                             skipped_volume += 1
+                            continue
+                            
+                        # 4. WAJIB UPTREND: Harga 1 jam terakhir harus NAIK (> 0%)
+                        if price_change_h1 <= 0:
+                            skipped_trend += 1
                             continue
 
                     # Jika lolos semua filter, masukkan kandidat
@@ -156,43 +158,41 @@ class SolanaScanner:
                         "address": address,
                         "pair_address": pair_address,
                         "liquidity": liquidity,
+                        "volume_h1": volume_h1, # Kita pakai volume H1 buat sorting Trader
                         "volume": volume_24h,
                         "fdv": fdv,
-                        "age_hours": pair_age_hours,
+                        "price_change_h1": price_change_h1,
                         "age_minutes": pair_age_minutes,
-                        "url": p['url']
+                        "age_hours": pair_age_hours,
+                        "url": p.get('url')
                     })
                 
                 # === LANGKAH 5: SORTING & SELECTION ===
                 if candidates:
                     if mode == "SNIPER":
-                        # Sniper: AGGRESSIVE SORTING
-                        # Prioritas 1: Umur < 1 menit (SUPER PRIORITY) di paling atas
-                        # Prioritas 2: Sisa koin diurutkan dari termuda
-                        super_fresh = [c for c in candidates if c['age_minutes'] < 1.0]
-                        other_fresh = [c for c in candidates if c['age_minutes'] >= 1.0]
-                        
-                        # Sort super fresh by age (termuda duluan)
-                        super_fresh.sort(key=lambda x: (x['age_minutes'], -x['liquidity']))
-                        # Sort other fresh by age
-                        other_fresh.sort(key=lambda x: (x['age_minutes'], -x['liquidity']))
-                        
-                        # Gabung: super fresh duluan, baru yang lain
-                        candidates = super_fresh + other_fresh
+                        # Sniper: Prioritas Likuiditas Tertinggi (Cari yang paling siap di antara yang baru)
+                        candidates.sort(key=lambda x: x['liquidity'], reverse=True)
                     else:
-                        # Trader: Prioritas Volume Tertinggi
-                        candidates.sort(key=lambda x: (-x['volume'], -x['liquidity']))
+                        # Trader: Prioritas Volume H1 Tertinggi (Cari yang sedang HYPE)
+                        candidates.sort(key=lambda x: x['volume_h1'], reverse=True)
                         
                     best_gem = candidates[0]
+                    
                     age_label = f"{best_gem['age_minutes']:.1f}m" if best_gem['age_minutes'] < 60 else f"{best_gem['age_hours']:.2f}h"
+                    trend_emoji = "NZ" if best_gem.get('price_change_h1', 0) > 0 else "🔻"
+                    
                     sys_logger.add_log(
-                        f"💎 GEM ({mode}): {best_gem['symbol']} | Age: {age_label} | FDV: ${best_gem['fdv']:,.0f} | Liq: ${best_gem['liquidity']:,.0f}"
+                        f"💎 GEM ({mode}): {best_gem['symbol']} | Age: {age_label} | "
+                        f"Liq: ${best_gem['liquidity']:,.0f} | Vol(1h): ${best_gem['volume_h1']:,.0f} | "
+                        f"Trend: {best_gem.get('price_change_h1')}% {trend_emoji}"
                     )
                     return best_gem
                 
                 # Log detail kenapa kosong (Untuk Debugging)
                 sys_logger.add_log(
-                    f"⚠️ No Result ({mode}). QuoteSkip: {skipped_quote}, Age: {skipped_age}, FDV: {skipped_fdv}, Stable: {skipped_stable}, Liq: {skipped_liquidity}, Vol: {skipped_volume}, Ignored: {skipped_ignore}"
+                    f"⚠️ No Result ({mode}). Skip: Quote={skipped_quote}, Age={skipped_age}, FDV={skipped_fdv}, "
+                    f"Stable={skipped_stable}, Liq={skipped_liquidity}, Vol={skipped_volume}, "
+                    f"Trend={skipped_trend}, Ignored={skipped_ignore}"
                 )
                 return None
 

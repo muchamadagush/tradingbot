@@ -22,14 +22,17 @@ MAX_POSITIONS = 10  # Maksimal posisi bersamaan
 
 STRATEGY_RULES = {
     "SNIPER": {
-        "tp_pct": 200.0,   # +200%
-        "sl_pct": -50.0,   # -50%
-        "slippage_bps": 2000  # 20%
+        # Strategi Judi (JANGAN DIPAKAI DULU)
+        "tp_pct": 200.0,
+        "sl_pct": -50.0,
+        "slippage_bps": 2000
     },
     "TRADER": {
-        "tp_pct": 20.0,    # +20%
-        "sl_pct": -10.0,   # -10%
-        "slippage_bps": 100  # 1%
+        # Strategi Alpha Hunter (REKOMENDASI)
+        "tp_pct": 30.0,     # Ambil profit di 30% (Cukup sering terjadi saat pump)
+        "sl_pct": -15.0,    # Cut loss di 15% (Jangan biarkan rugi dalam)
+        "slippage_bps": 500, # Slippage 5% (Wajar untuk koin liquid)
+        "trailing_stop": True # Aktifkan trailing stop jika nanti sudah profit
     }
 }
 
