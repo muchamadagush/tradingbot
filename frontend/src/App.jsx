@@ -47,19 +47,18 @@ function App() {
 
       let targetSymbol = "BTC/USDT"
       if (resBot.data.current_activity) {
-        if (resBot.data.current_activity.includes("Managing") || resBot.data.current_activity.includes("Analyzing")) {
+        if (resBot.data.current_activity.includes("Managing") || resBot.data.current_activity.includes("Scanning")) {
           const parts = resBot.data.current_activity.split(" ")
           if (parts.length > 1) targetSymbol = parts[1]
         }
       }
-      setActiveSymbol(targetSymbol.replace(/\./g, "").trim())
+      setActiveSymbol(targetSymbol.trim())
 
-      // 2. Harga Market Tokocrypto
+      // 2. Harga Market Exchange
       try {
-        const cleanSymbol = targetSymbol.replace("/", "").replace(/\./g, "").trim()
-        const resPrice = await axios.get(`${VITE_API_URL}/api/toko/price/${cleanSymbol}`)
+        const resPrice = await axios.get(`${VITE_API_URL}/api/toko/price/${targetSymbol}`)
         setMarketData(resPrice.data)
-      } catch (e) { }
+      } catch (e) { console.debug("Price fetch error", e) }
 
       // 3. Portfolio Solana
       try {
@@ -95,8 +94,8 @@ function App() {
       // 6. Ambil System Logs
       try {
         const resLogs = await axios.get(`${VITE_API_URL}/api/system/logs`)
-        console.log('System Logs:', resLogs.data)
-        setSystemLogs(resLogs.data)
+        const logs = resLogs.data?.logs || resLogs.data || []
+        setSystemLogs(Array.isArray(logs) ? logs : [])
       } catch (e) {
         console.error("System Logs Error", e)
       }
@@ -321,7 +320,7 @@ function App() {
             </div>
             {marketData ? (
               <div style={{ textAlign: 'center' }}>
-                <h1 style={{ margin: '0', fontSize: '42px', color: '#2c3e50' }}>${parseFloat(marketData.current_price).toLocaleString()}</h1>
+                <h1 style={{ margin: '0', fontSize: '42px', color: '#2c3e50' }}>${(marketData.price ? parseFloat(marketData.price) : 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 8})}</h1>
               </div>
             ) : <p style={{ textAlign: 'center', color: '#7f8c8d' }}>Scanner Idle...</p>}
           </div>

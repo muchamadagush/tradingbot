@@ -1,27 +1,34 @@
+# ==========================================
 # File: backend/main.py
+# ==========================================
+
 import os
-import ccxt.async_support as ccxt
 import asyncio
-import database
-import strategy 
-import solana_tracker
-import sys_logger
-
-# --- NEW IMPORTS untuk Safety Features ---
-import backtesting
-import paper_trading
-import fee_calculator
-from risk_manager import RiskManager, RiskLimits
-
-# --- IMPORT MODUL PENTING ---
-from jupiter_handler import jupiter_bot
-from solana_auto import solana_auto  # <--- WAJIB ADA AGAR TIDAK ERROR
-import analytics  # <--- Import Analytics Module
-
+import ccxt.async_support as ccxt
+from dotenv import load_dotenv
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from dotenv import load_dotenv
+
+import database
+import strategy
+import solana_tracker
+import sys_logger
+import analytics
+
+import backtesting
+import paper_trading
+import fee_calculator
+import execution  # P3: Execution utilities with retry and order book check
+
+from risk_manager import RiskManager, RiskLimits, BotRiskRegistry, BotType
+from jupiter_handler import jupiter_bot
+from solana_auto import solana_auto
+from global_kill_switch import kill_switch
+
+# ==========================================
+# ENV & APP INIT
+# ==========================================
 
 load_dotenv()
 app = FastAPI()
@@ -34,55 +41,102 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- BOT MODE CONFIGURATION ---
-BOT_MODE = os.getenv('BOT_MODE', 'PAPER').upper()  # LIVE, PAPER, or BACKTEST
-PAPER_INITIAL_BALANCE = float(os.getenv('PAPER_INITIAL_BALANCE', '1000.0'))
+# ==========================================
+# BOT MODE CONFIG
+# ==========================================
 
-# Initialize Risk Manager
+BOT_MODE = os.getenv("BOT_MODE", "PAPER").upper()
+PAPER_INITIAL_BALANCE = float(os.getenv("PAPER_INITIAL_BALANCE", "1000"))
+
+# ==========================================
+# RISK MANAGERS (PER-BOT)
+# ==========================================
+
+# Legacy global risk manager (for backward compatibility)
 risk_limits = RiskLimits(
-    max_position_size_pct=float(os.getenv('MAX_POSITION_SIZE_PCT', '20.0')),
-    max_portfolio_drawdown_pct=float(os.getenv('MAX_PORTFOLIO_DRAWDOWN_PCT', '15.0')),
-    max_daily_loss_pct=float(os.getenv('MAX_DAILY_LOSS_PCT', '5.0')),
-    max_open_positions=int(os.getenv('MAX_OPEN_POSITIONS', '5')),
-    risk_per_trade_pct=float(os.getenv('RISK_PER_TRADE_PCT', '2.0'))
+    max_position_size_pct=float(os.getenv("MAX_POSITION_SIZE_PCT", "20")),
+    max_portfolio_drawdown_pct=float(os.getenv("MAX_PORTFOLIO_DRAWDOWN_PCT", "15")),
+    max_daily_loss_pct=float(os.getenv("MAX_DAILY_LOSS_PCT", "5")),
+    max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS", "5")),
+    risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "2")),
 )
+
 risk_manager = RiskManager(PAPER_INITIAL_BALANCE, risk_limits)
 
-# Initialize Fee Calculator
+# NEW: Per-bot risk registry with bot-specific profiles
+bot_risk = BotRiskRegistry(PAPER_INITIAL_BALANCE)
+hunter_risk = bot_risk.hunter()   # For Tokocrypto Hunter
+trader_risk = bot_risk.trader()   # For Solana Trader
+sniper_risk = bot_risk.sniper()   # For Solana Sniper
+
+# ==========================================
+# FEE CALCULATOR
+# ==========================================
+
 fee_calc = fee_calculator.get_calculator(
-    exchange_id='tokocrypto',
-    slippage_pct=float(os.getenv('SLIPPAGE_PCT', '0.0005'))
+    exchange_id="tokocrypto",
+    slippage_pct=float(os.getenv("SLIPPAGE_PCT", "0.0005")),
 )
 
-print(f"{'='*60}")
-print(f"🤖 TRADING BOT STARTED")
-print(f"{'='*60}")
-print(f"🎯 Mode: {BOT_MODE}")
-if BOT_MODE == 'PAPER':
-    print(f"💵 Paper Balance: ${paper_trading.paper_account.balance:.2f}")
-elif BOT_MODE == 'LIVE':
-    print(f"⚠️  LIVE TRADING MODE - REAL MONEY AT RISK!")
-print(f"🛡️ Risk Management: ENABLED")
-print(f"   - Max Position: {risk_limits.max_position_size_pct}%")
-print(f"   - Max Drawdown: {risk_limits.max_portfolio_drawdown_pct}%")
-print(f"   - Risk/Trade: {risk_limits.risk_per_trade_pct}%")
-print(f"{'='*60}\n")
+# ==========================================
+# EXCHANGE INIT
+# ==========================================
 
-# Add logs to system logger
-sys_logger.add_log(f"✅ TRADING BOT STARTED - Mode: {BOT_MODE}")
-sys_logger.add_log(f"💵 Initial Balance: ${PAPER_INITIAL_BALANCE:.2f}")
-sys_logger.add_log(f"🛡️  Risk Management: Enabled")
-sys_logger.add_log(f"🔗 API Connection: Ready")
+# Support PAPER MODE tanpa credentials
+if BOT_MODE == "PAPER":
+    # Paper mode - use Binance public API for testing (fallback exchange)
+    exchange = ccxt.binance({
+        "enableRateLimit": True,
+        "options": {"defaultType": "spot"},
+    })
+    sys_logger.add_log("📄 PAPER MODE: Using Binance public API for testing")
+else:
+    # Live mode - requires Tokocrypto credentials
+    toko_key = os.getenv("TOKO_API_KEY", "")
+    toko_secret = os.getenv("TOKO_SECRET_KEY", "")
+    
+    if not toko_key or not toko_secret:
+        sys_logger.add_log("⚠️ WARNING: No Tokocrypto credentials, using Binance public API")
+        BOT_MODE = "PAPER"
+    
+    # Try Tokocrypto first (if it exists in CCXT), fallback to Binance
+    try:
+        # Attempt to use Tokocrypto (may fail if not available in this CCXT version)
+        exchange = ccxt.tokocrypto({
+            "apiKey": toko_key,
+            "secret": toko_secret,
+            "enableRateLimit": True,
+            "options": {"defaultType": "spot"},
+        })
+        sys_logger.add_log("🔌 Connected to Tokocrypto")
+    except Exception as e:
+        sys_logger.add_log(f"⚠️ Tokocrypto unavailable ({str(e)[:50]}), using Binance")
+        exchange = ccxt.binance({
+            "apiKey": toko_key,  # Try using same keys
+            "secret": toko_secret,
+            "enableRateLimit": True,
+            "options": {"defaultType": "spot"},
+        })
 
-# --- SETUP EXCHANGE (TOKOCRYPTO) ---
-exchange = ccxt.tokocrypto({
-    'apiKey': os.getenv('TOKO_API_KEY'),
-    'secret': os.getenv('TOKO_SECRET_KEY'),
-    'enableRateLimit': True, 
-})
+
+# ==========================================
+# GLOBAL STATE
+# ==========================================
 
 IS_BOT_RUNNING = False
 CURRENT_SCAN_TARGET = "Idle"
+
+# Trailing Stop State (per trade_id)
+# {trade_id: {"high_price": float, "trailing_stop": float}}
+TRAILING_STOP_STATE = {}
+
+# Trailing Stop Config
+TRAILING_STOP_ACTIVATION_PCT = 0.01   # Activate after 1% profit
+TRAILING_STOP_DISTANCE_PCT = 0.015    # Trail 1.5% behind high
+
+# ==========================================
+# MODELS
+# ==========================================
 
 class TradeSignal(BaseModel):
     symbol: str
@@ -93,805 +147,892 @@ class SwapRequest(BaseModel):
     input_token: str = "SOL"
     output_token: str = "USDC"
 
-# --- DATABASE HELPERS ---
+# ==========================================
+# DATABASE HELPERS (USING ATOMIC TRADE LIFECYCLE)
+# ==========================================
+
 def get_any_active_trade():
+    """Get any trade in OPEN or CLOSING state."""
     conn = database.get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM trades WHERE status = 'OPEN' LIMIT 1")
-    trade = cursor.fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM trades WHERE status IN ('OPEN', 'CLOSING') LIMIT 1")
+    row = cur.fetchone()
     conn.close()
-    return trade
+    return row
 
-def save_buy_trade(symbol, price, amount, usdt):
-    conn = database.get_connection()
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO trades (symbol, side, buy_price, amount, total_usdt, status) VALUES (?, 'BUY', ?, ?, ?, 'OPEN')", (symbol, price, amount, usdt))
-    conn.commit()
-    conn.close()
-
-def save_sell_trade(trade_id, sell_price, profit):
-    conn = database.get_connection()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE trades SET status = 'CLOSED', sell_price = ?, profit_usdt = ?, closed_at = CURRENT_TIMESTAMP WHERE id = ?", (sell_price, profit, trade_id))
-    conn.commit()
-    conn.close()
-
-# --- MARKET SCANNER ---
-async def get_top_liquid_coins(limit=10):
-    try:
-        tickers = await exchange.fetch_tickers()
-        valid_pairs = []
-        blacklist_base = ['USDC', 'BUSD', 'TUSD', 'USDP', 'FDUSD', 'DAI', 'EUR', 'USDT'] 
-
-        for symbol, data in tickers.items():
-            if "USDT" not in symbol: continue
-            
-            clean_symbol = symbol
-            base_currency = ""
-            if '/' in symbol:
-                parts = symbol.split('/')
-                if parts[1] != 'USDT': continue
-                base_currency = parts[0]
-                clean_symbol = symbol
-            else:
-                if symbol.endswith('USDT'):
-                    base_currency = symbol[:-4]
-                    clean_symbol = f"{base_currency}/USDT"
-                elif symbol.endswith('_USDT'):
-                    base_currency = symbol[:-5]
-                    clean_symbol = f"{base_currency}/USDT"
-                else:
-                    continue
-
-            if base_currency in blacklist_base: continue
-            
-            vol = data.get('quoteVolume')
-            if vol is None: vol = 0
-            valid_pairs.append({'symbol': clean_symbol, 'volume': float(vol)})
-
-        sorted_pairs = sorted(valid_pairs, key=lambda x: x['volume'], reverse=True)
-        top_symbols = [p['symbol'] for p in sorted_pairs[:limit]]
-        
-        if not top_symbols: return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-        return top_symbols
-
-    except Exception as e:
-        print(f"⚠️ [ERROR SCAN]: {e}")
-        return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-
-# --- JANTUNG BOT HUNTER ---
-async def auto_trading_loop():
-    global CURRENT_SCAN_TARGET
-    print("🚀 Bot Hunter Mode: ON (Real Execution Ready)")
-    sys_logger.add_log("🚀 Bot Loop Started")
+def save_buy_trade(symbol, price, amount, usdt, bot_type="HUNTER"):
+    """
+    Create and immediately open a trade using atomic lifecycle.
+    Returns trade_id.
+    """
+    # Create in PENDING state
+    trade_id = database.create_trade(
+        symbol=symbol,
+        buy_price=price,
+        amount=amount,
+        total_usdt=usdt,
+        bot_type=bot_type,
+        mode=BOT_MODE
+    )
     
-    # Load market agar simbol terupdate
-    try: await exchange.load_markets()
-    except: pass
-
-    # --- KONFIGURASI DASAR ---
-    TP_PERCENT = 0.015  # Take Profit 1.5%
-    SL_PERCENT = 0.03   # Stop Loss 3.0%
-    TRADE_AMOUNT_USDT = 12.0 # Modal per trade (Min $10 di Toko)
+    # Immediately transition to OPEN (order confirmed)
+    database.open_trade(trade_id, reason="ORDER_FILLED")
     
-    while IS_BOT_RUNNING:
-        # 1. MANAGEMENT POSISI (Jual jika TP/SL)
-        active_trade = get_any_active_trade()
-        
-        if active_trade:
-            symbol = active_trade['symbol']
-            CURRENT_SCAN_TARGET = f"Managing {symbol}"
-            try:
-                ticker = await exchange.fetch_ticker(symbol)
-                current_price = ticker['last']
-                
-                # Analisa ulang (Opsional, bisa dihapus jika murni TP/SL)
-                signal, _, _ = await strategy.analyze_market(exchange, symbol)
-                
-                buy_price = active_trade['buy_price']
-                amount = active_trade['amount']
-                pnl_pct = (current_price - buy_price) / buy_price
-                
-                should_sell = False
-                reason = ""
-                
-                # Logic Penjualan
-                if pnl_pct > TP_PERCENT: should_sell, reason = True, f"✅ TAKE PROFIT (+{pnl_pct*100:.2f}%)"
-                elif pnl_pct < -SL_PERCENT: should_sell, reason = True, f"🛡️ STOP LOSS ({pnl_pct*100:.2f}%)"
-                elif signal == "SELL": should_sell, reason = True, "📉 STRATEGY SELL"
+    return trade_id
 
-                if should_sell:
-                    print(f"🔴 EXECUTING SELL {symbol} | {reason}")
-                    sys_logger.add_log(f"🔴 SELL {symbol} | {reason}")
-                    
-                    # --- [FIX] EKSEKUSI REAL KE EXCHANGE ---
-                    if BOT_MODE == 'LIVE':
-                        try:
-                            # Kirim Order Jual ke Tokocrypto
-                            order = await exchange.create_market_sell_order(symbol, amount)
-                            sys_logger.add_log(f"✅ REAL SOLD: {order['id']}")
-                        except Exception as e:
-                            sys_logger.add_log(f"❌ SELL FAILED: {e}")
-                            # Jangan update database jika gagal jual di exchange (kecuali mau force close)
-                    
-                    # Simpan ke DB & Update Risk Manager
-                    profit_usdt = (current_price - buy_price) * amount
-                    save_sell_trade(active_trade['id'], current_price, profit_usdt)
-                    risk_manager.record_trade_pnl(profit_usdt) # Penting untuk hitung kuota rugi harian
-
-                else:
-                    print(f"👀 {symbol} PnL: {pnl_pct*100:.2f}%")
-            
-            except Exception as e:
-                 print(f"Error Managing: {e}")
-            await asyncio.sleep(2)
-
-        # 2. SCANNING POSISI BARU (Beli)
-        else:
-            # --- [FIX] Validasi Risk Manager Sebelum Scan ---
-            if not risk_manager.can_trade_new():
-                CURRENT_SCAN_TARGET = "Risk Limit Reached"
-                sys_logger.add_log("🛑 Daily Loss Limit Reached / Max Drawdown Hit")
-                await asyncio.sleep(60) # Istirahat 1 menit
-                continue
-
-            top_coins = await get_top_liquid_coins(limit=10)
-            
-            for symbol in top_coins:
-                if not IS_BOT_RUNNING: break
-                CURRENT_SCAN_TARGET = f"Analyzing {symbol}" 
-                
-                try:
-                    # Analisa Teknikal
-                    signal, price, indicators = await strategy.analyze_market(exchange, symbol)
-                    
-                    if signal == "BUY":
-                        # Cek Saldo Real
-                        balance = await exchange.fetch_balance()
-                        usdt_balance = balance['USDT']['free']
-                        
-                        # Cek Izin Risk Manager
-                        current_positions = 0 # Karena limit 1 trade aktif
-                        risk_check = risk_manager.can_open_position(current_positions, usdt_balance, TRADE_AMOUNT_USDT)
-                        
-                        if risk_check['approved']:
-                            print(f"🟢 FOUND GEM: {symbol} @ {price}")
-                            sys_logger.add_log(f"🟢 BUY SIGNAL: {symbol}")
-                            
-                            amount_coin = TRADE_AMOUNT_USDT / price
-                            
-                            # --- [FIX] EKSEKUSI REAL KE EXCHANGE ---
-                            if BOT_MODE == 'LIVE':
-                                if usdt_balance >= TRADE_AMOUNT_USDT:
-                                    try:
-                                        # Kirim Order Beli ke Tokocrypto
-                                        order = await exchange.create_market_buy_order(symbol, amount_coin)
-                                        sys_logger.add_log(f"✅ REAL BOUGHT: {order['id']}")
-                                        
-                                        # Simpan ke DB hanya jika sukses beli
-                                        save_buy_trade(symbol, price, amount_coin, TRADE_AMOUNT_USDT)
-                                        break # Stop scanning, fokus manage posisi ini
-                                    except Exception as e:
-                                        sys_logger.add_log(f"❌ BUY FAILED: {e}")
-                                else:
-                                    sys_logger.add_log("⚠️ Saldo USDT Tidak Cukup")
-                            
-                            # MODE PAPER/TEST
-                            else:
-                                save_buy_trade(symbol, price, amount_coin, TRADE_AMOUNT_USDT)
-                                break
-                        else:
-                            print(f"🛑 Skip {symbol}: Risk Rejected ({risk_check['reasons']})")
-                    
-                    await asyncio.sleep(1.0) # Jeda antar koin
-                    
-                except Exception as e:
-                    print(f"⚠️ Skip {symbol}: {e}")
-            
-            CURRENT_SCAN_TARGET = "Idle"
-            await asyncio.sleep(3)
-
-    try: await exchange.close()
-    except: pass
-    print("🛑 Bot Berhenti.")
+def save_sell_trade(trade_id, sell_price, profit, reason="TP_HIT"):
+    """
+    Close a trade using atomic lifecycle with ledger logging.
+    """
+    # Start closing
+    database.start_closing_trade(trade_id, reason=reason)
+    
+    # Complete the close
+    database.close_trade(
+        trade_id=trade_id,
+        sell_price=sell_price,
+        profit=profit,
+        reason=reason
+    )
 
 # ==========================================
-# ENDPOINTS API
+# MARKET SCANNER
+# ==========================================
+
+async def get_top_liquid_coins(limit=10):
+    """Fetch top liquid coins from exchange with fallback."""
+    try:
+        tickers = await exchange.fetch_tickers()
+        pairs = []
+
+        for symbol, data in tickers.items():
+            if "USDT" not in symbol:
+                continue
+
+            vol = float(data.get("quoteVolume") or 0)
+            clean = symbol.replace("_", "/")
+
+            if "/" not in clean:
+                continue
+
+            base, quote = clean.split("/")
+            if quote != "USDT":
+                continue
+
+            pairs.append({"symbol": clean, "volume": vol})
+
+        pairs.sort(key=lambda x: x["volume"], reverse=True)
+        result = [p["symbol"] for p in pairs[:limit]] or ["BTC/USDT", "ETH/USDT"]
+        sys_logger.add_log(f"📊 Scanned {len(pairs)} pairs, top {len(result)} selected")
+        return result
+
+    except Exception as e:
+        error_type = execution.classify_error(e)
+        sys_logger.add_log(f"⚠️ [GET_COINS] {error_type}: {str(e)[:80]}")
+        # Fallback to common pairs when exchange API fails
+        return ["BTC/USDT", "ETH/USDT", "BNB/USDT", "XRP/USDT", "ADA/USDT"]
+
+# ==========================================
+# BOT LOOP (HUNTER)
+# ==========================================
+
+async def auto_trading_loop():
+    global CURRENT_SCAN_TARGET
+
+    sys_logger.add_log("🚀 Hunter Bot Loop Started")
+
+    try:
+        await exchange.load_markets()
+    except:
+        pass
+
+    TP = 0.015
+    SL = 0.03
+    TRADE_USDT = 12.0
+
+    while IS_BOT_RUNNING:
+        # ========== KILL SWITCH CHECK ==========
+        if not kill_switch.is_trading_allowed():
+            CURRENT_SCAN_TARGET = "⛔ KILL SWITCH ACTIVE"
+            sys_logger.add_log("⛔ Trading blocked by kill switch")
+            await asyncio.sleep(30)  # Check again in 30 seconds
+            continue
+        
+        # ========== HUNTER RISK CHECK ==========
+        if not hunter_risk.can_trade_new():
+            if hunter_risk.is_in_cooldown():
+                remaining = hunter_risk.get_cooldown_remaining()
+                CURRENT_SCAN_TARGET = f"⏸️ Cooldown ({remaining}s)"
+                sys_logger.add_log(f"⏸️ Hunter in cooldown: {remaining}s remaining")
+            else:
+                CURRENT_SCAN_TARGET = "⚠️ Risk limit reached"
+                sys_logger.add_log("⚠️ Hunter trading halted by risk manager")
+            await asyncio.sleep(10)
+            continue
+        
+        active = get_any_active_trade()
+
+        # ======================
+        # MANAGE OPEN POSITION (WITH TRAILING STOP)
+        # ======================
+        if active:
+            symbol = active["symbol"]
+            trade_id = active["id"]
+            CURRENT_SCAN_TARGET = f"Managing {symbol}"
+
+            try:
+                ticker = await exchange.fetch_ticker(symbol)
+                price = ticker["last"]
+
+                buy_price = active["buy_price"]
+                amount = active["amount"]
+
+                pnl_pct = (price - buy_price) / buy_price
+                
+                # ========== TRAILING STOP LOGIC ==========
+                exit_reason = None
+                should_exit = False
+                
+                # Initialize trailing stop state for this trade
+                if trade_id not in TRAILING_STOP_STATE:
+                    TRAILING_STOP_STATE[trade_id] = {
+                        "high_price": price,
+                        "trailing_active": False
+                    }
+                
+                ts_state = TRAILING_STOP_STATE[trade_id]
+                
+                # Update high water mark
+                if price > ts_state["high_price"]:
+                    ts_state["high_price"] = price
+                
+                # Activate trailing stop when profit reaches threshold
+                if pnl_pct >= TRAILING_STOP_ACTIVATION_PCT:
+                    ts_state["trailing_active"] = True
+                    trailing_stop_price = ts_state["high_price"] * (1 - TRAILING_STOP_DISTANCE_PCT)
+                    
+                    # Check if trailing stop hit
+                    if price <= trailing_stop_price:
+                        should_exit = True
+                        exit_reason = "TRAILING_STOP"
+                
+                # Regular TP/SL still applies
+                if pnl_pct >= TP:
+                    should_exit = True
+                    exit_reason = "TP_HIT"
+                elif pnl_pct <= -SL:
+                    should_exit = True
+                    exit_reason = "SL_HIT"
+                
+                # Execute exit if needed
+                if should_exit and exit_reason:
+                    profit = (price - buy_price) * amount
+
+                    if BOT_MODE == "LIVE":
+                        # P3: Use safe execution with retry
+                        result = await execution.safe_execute_order(
+                            exchange, symbol, "sell", amount * price,
+                            max_slippage_pct=1.0, check_liquidity_first=True
+                        )
+                        if not result["success"]:
+                            sys_logger.add_log(f"⚠️ Sell failed: {result.get('error')}")
+                            continue
+
+                    save_sell_trade(active["id"], price, profit, reason=exit_reason)
+                    hunter_risk.record_trade_pnl(profit)
+                    
+                    # Cleanup trailing stop state
+                    if trade_id in TRAILING_STOP_STATE:
+                        del TRAILING_STOP_STATE[trade_id]
+                    
+                    sys_logger.add_log(f"📊 Trade closed: {symbol} | {exit_reason} | PnL: ${profit:.2f}")
+
+                await asyncio.sleep(2)
+
+            except Exception as e:
+                error_type = execution.classify_error(e)
+                print(f"[MANAGE ERROR] {error_type}: {e}")
+
+        # ======================
+        # SCAN NEW TRADE
+        # ======================
+        else:
+            if not risk_manager.can_trade_new():
+                CURRENT_SCAN_TARGET = "Risk Limit Hit"
+                await asyncio.sleep(30)
+                continue
+
+            for symbol in await get_top_liquid_coins():
+                if not IS_BOT_RUNNING:
+                    break
+
+                CURRENT_SCAN_TARGET = f"Scanning {symbol}"
+
+                try:
+                    # P3: Check spread before analyzing
+                    spread_ok, spread_info = await execution.check_spread(exchange, symbol, max_spread_pct=0.5)
+                    if not spread_ok:
+                        sys_logger.add_log(f"⏭️ Skip {symbol}: high spread {spread_info.get('spread_pct', 0):.2f}%")
+                        continue
+                    
+                    signal, price, _ = await strategy.analyze_market(exchange, symbol)
+                    if signal != "BUY":
+                        continue
+
+                    amount = TRADE_USDT / price
+                    
+                    # P3: Check liquidity before buy
+                    is_liquid, liquidity = await execution.check_liquidity(
+                        exchange, symbol, TRADE_USDT, "buy", max_slippage_pct=0.5
+                    )
+                    if not is_liquid:
+                        sys_logger.add_log(f"⏭️ Skip {symbol}: low liquidity")
+                        continue
+
+                    if BOT_MODE == "LIVE":
+                        # P3: Use safe execution with retry
+                        result = await execution.safe_execute_order(
+                            exchange, symbol, "buy", TRADE_USDT,
+                            max_slippage_pct=0.5, check_liquidity_first=False  # Already checked
+                        )
+                        if not result["success"]:
+                            sys_logger.add_log(f"❌ Buy failed: {result.get('error')}")
+                            continue
+
+                    save_buy_trade(symbol, price, amount, TRADE_USDT)
+                    break
+
+                except Exception as e:
+                    error_type = execution.classify_error(e)
+                    print(f"[SCAN ERROR] {symbol} {error_type}: {e}")
+
+                await asyncio.sleep(1)
+
+        await asyncio.sleep(1)
+
+    await exchange.close()
+
+# ==========================================
+# API ENDPOINTS
 # ==========================================
 
 @app.get("/")
-def home(): return {"status": "Ready"}
+def home():
+    return {"status": "ready"}
 
-# --- BOT HUNTER CONTROL ---
 @app.post("/api/bot/toggle")
-async def toggle_bot(background_tasks: BackgroundTasks):
+async def toggle_bot(bg: BackgroundTasks):
     global IS_BOT_RUNNING
+
+    IS_BOT_RUNNING = not IS_BOT_RUNNING
+
     if IS_BOT_RUNNING:
-        IS_BOT_RUNNING = False
-        sys_logger.add_log("🛑 Hunter Bot: STOPPED")
-        return {"status": "stopped", "message": "Bot dimatikan."}
-    else:
-        IS_BOT_RUNNING = True
-        sys_logger.add_log("🚀 Hunter Bot: STARTED - Scanning markets...")
-        background_tasks.add_task(auto_trading_loop)
-        return {"status": "running", "message": "Bot dijalankan!"}
+        bg.add_task(auto_trading_loop)
+        return {"status": "running"}
+    return {"status": "stopped"}
 
 @app.get("/api/bot/status")
-def get_bot_status():
-    return {"is_running": IS_BOT_RUNNING, "current_activity": CURRENT_SCAN_TARGET}
-
-@app.get("/api/trade/history")
-def get_history():
-    conn = database.get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 20")
-    trades = cursor.fetchall()
-    conn.close()
-    return trades
-
-@app.get("/api/toko/price/{symbol}")
-async def get_price(symbol: str):
-    try:
-        if "USDT" in symbol and "/" not in symbol:
-            base = symbol.replace("USDT", "")
-            formatted = f"{base}/USDT"
-        else:
-            formatted = symbol.replace("USDT", "/USDT")
-        ticker = await exchange.fetch_ticker(formatted)
-        return {"current_price": ticker['last'], "high_24h": ticker['high'], "low_24h": ticker['low']}
-    except:
-        return {"current_price": 0, "high_24h": 0, "low_24h": 0}
-
-# --- SOLANA & JUPITER ENDPOINTS ---
-
-@app.get("/api/solana/balance")
-async def get_solana_balance():
-    """Mengambil semua saldo token di dompet (SOL, USDC, BONK, dll)"""
-    return await jupiter_bot.get_token_balances()
-
-@app.get("/api/solana/quote")
-async def get_jupiter_quote(amount: float = 0.01, to_token: str = "USDC"):
-    """Cek harga SOL ke Token tertentu"""
-    result = await jupiter_bot.get_quote(
-        input_token="SOL", 
-        output_token=to_token, 
-        amount_sol=amount
-    )
-    return result
-
-@app.post("/api/solana/swap")
-async def execute_solana_swap(request: SwapRequest):
-    """Eksekusi Swap Manual"""
-    quote = await jupiter_bot.get_quote(
-        input_token=request.input_token,
-        output_token=request.output_token,
-        amount_sol=request.amount
-    )
-    
-    if "error" in quote:
-        return {"status": "error", "message": quote["error"]}
-        
-    result = await jupiter_bot.execute_swap(quote['raw_data'])
-    
-    if "status" in result and result["status"] == "success":
-        # Untuk manual swap, kita cari mint address dari output_token
-        token_address = TOKENS.get(request.output_token, request.output_token) if request.input_token == "SOL" else TOKENS.get(request.input_token, request.input_token)
-        solana_tracker.save_trade(
-            txid=result.get("txid", "UNKNOWN"),
-            input_token=request.input_token,
-            output_token=request.output_token,
-            input_amount=request.amount,
-            output_estimate=quote.get("output_estimate", 0),
-            token_address=token_address
-        )
-    
-    return result
-
-@app.get("/api/solana/history")
-async def get_solana_history():
-    """Mengambil riwayat transaksi Solana"""
-    return solana_tracker.load_history()
-
-# --- SOLANA AUTO & GOD MODE ENDPOINTS ---
-
-@app.post("/api/solana/auto/toggle")
-async def toggle_solana_auto(request: dict):
-    """Saklar untuk Menyalakan/Mematikan Auto Bot"""
-    mode = request.get("mode", "MANUAL_TARGET") 
-    token = request.get("token", "USDC")
-    strategy = request.get("strategy", "TRADER")
-    strategy = strategy.upper() if isinstance(strategy, str) else "TRADER"
-    if strategy not in ("SNIPER", "TRADER"):
-        strategy = "TRADER"
-    
-    if solana_auto.is_running:
-        # Jika mode & strategi sama, stop bot
-        if solana_auto.mode == mode and solana_auto.strategy == strategy:
-            solana_auto.stop()
-            return {"status": "stopped", "message": "Auto Stopped"}
-        # Jika mode berbeda, restart dengan mode baru
-        else:
-            solana_auto.stop()
-            await asyncio.sleep(0.5)  # Tunggu bot berhenti sepenuhnya
-            asyncio.create_task(solana_auto.start(mode=mode, token_symbol=token, strategy=strategy))
-            return {"status": "running", "message": f"Auto Restarted in {mode} ({strategy})"}
-    else:
-        asyncio.create_task(solana_auto.start(mode=mode, token_symbol=token, strategy=strategy))
-        return {"status": "running", "message": f"Auto Started in {mode} ({strategy})"}
-
-@app.get("/api/solana/auto/status")
-async def get_solana_auto_status():
-    """Get status of Solana Auto Bot"""
+def bot_status():
     return {
-        "is_running": solana_auto.is_running,
-        "mode": solana_auto.mode,
-        "strategy": solana_auto.strategy,
-        "target": solana_auto.target_token,
-        # UPDATE DI SINI: Gunakan 'positions' (plural) dan ambil list active_positions
-        "positions": solana_auto.active_positions, 
-        "count": len(solana_auto.active_positions)
+        "is_running": IS_BOT_RUNNING,
+        "current_activity": CURRENT_SCAN_TARGET,
+        "running": IS_BOT_RUNNING,  # Legacy
+        "activity": CURRENT_SCAN_TARGET,  # Legacy
     }
 
-# --- SYSTEM LOGS ---
-@app.get("/api/system/logs")
-def get_system_logs():
-    """Mengambil 50 log terakhir dari scanner & bot"""
-    logs = sys_logger.get_logs()
-    print(f"[DEBUG] Returning {len(logs)} logs to frontend")
-    return logs
+@app.get("/api/trade/history")
+def trade_history():
+    conn = database.get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 50")
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.get("/api/trade/ledger")
+def trade_ledger(trade_id: int = None, bot_type: str = None, limit: int = 100):
+    """
+    Get immutable trade ledger entries.
+    Filter by trade_id or bot_type.
+    """
+    return database.get_trade_history_from_ledger(
+        trade_id=trade_id,
+        bot_type=bot_type,
+        limit=limit
+    )
+
+@app.get("/api/trade/ledger/{trade_id}")
+def trade_ledger_by_id(trade_id: int):
+    """Get all ledger entries for a specific trade."""
+    return database.get_trade_history_from_ledger(trade_id=trade_id)
 
 # ==========================================
-# 🆕 BACKTESTING ENDPOINTS
+# SOLANA ENDPOINTS
 # ==========================================
 
-@app.post("/api/backtest/run")
-async def run_backtest(request: dict):
-    """
-    Run backtest untuk strategi Tokocrypto (Voting System + Risk Manager)
-    
-    Body:
-        {
-            "symbol": "BTC/USDT",
-            "timeframe": "1h",
-            "days_back": 30,
-            "initial_capital": 1000,
-            "take_profit_pct": 1.5,
-            "stop_loss_pct": 3.0,
-            "enable_risk_manager": true,
-            "trade_amount_usdt": 12.0
-        }
-    """
-    symbol = request.get('symbol', 'BTC/USDT')
-    timeframe = request.get('timeframe', '1h')
-    days_back = request.get('days_back', 30)
-    initial_capital = request.get('initial_capital', 1000.0)
-    take_profit_pct = request.get('take_profit_pct', 1.5)
-    stop_loss_pct = request.get('stop_loss_pct', 3.0)
-    enable_risk_manager = request.get('enable_risk_manager', True)
-    trade_amount_usdt = request.get('trade_amount_usdt', 12.0)
-    
-    engine = backtesting.BacktestEngine(
-        initial_capital=initial_capital,
-        enable_risk_manager=enable_risk_manager,
-        trade_amount_usdt=trade_amount_usdt
-    )
-    result = await engine.run_backtest(
-        symbol=symbol,
-        timeframe=timeframe,
-        days_back=days_back,
-        take_profit_pct=take_profit_pct,
-        stop_loss_pct=stop_loss_pct
-    )
-    
-    # Save to database
-    if 'error' not in result:
-        database.save_backtest_result(result)
-    
-    return result
+@app.get("/api/solana/balance")
+async def sol_balance():
+    return await jupiter_bot.get_token_balances()
 
-@app.post("/api/backtest/batch")
-async def run_batch_backtest(request: dict):
-    """
-    Run backtest untuk multiple symbols dengan strategi Tokocrypto
-    
-    Body:
-        {
-            "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
-            "timeframe": "1h",
-            "days_back": 30,
-            "enable_risk_manager": true,
-            "trade_amount_usdt": 12.0
-        }
-    """
-    symbols = request.get('symbols', ['BTC/USDT', 'ETH/USDT'])
-    timeframe = request.get('timeframe', '1h')
-    days_back = request.get('days_back', 30)
-    enable_risk_manager = request.get('enable_risk_manager', True)
-    trade_amount_usdt = request.get('trade_amount_usdt', 12.0)
-    
-    results = await backtesting.batch_backtest(
-        symbols, 
-        timeframe, 
-        days_back,
-        enable_risk_manager=enable_risk_manager,
-        trade_amount_usdt=trade_amount_usdt
-    )
-    
-    # Save all to database
-    for result in results:
-        if 'error' not in result:
-            database.save_backtest_result(result)
-    
-    return {"status": "completed", "results": results}
-
-@app.get("/api/backtest/history")
-def get_backtest_history(limit: int = 10):
-    """Get backtest history from database"""
-    history = database.get_backtest_history(limit)
-    return [dict(row) for row in history]
+@app.get("/api/solana/history")
+def sol_history():
+    return solana_tracker.load_history()
 
 # ==========================================
-# 🆕 PAPER TRADING ENDPOINTS
+# GLOBAL KILL SWITCH ENDPOINTS
+# ==========================================
+
+@app.get("/api/killswitch/status")
+def killswitch_status():
+    """Get current kill switch status and limits."""
+    return kill_switch.get_status()
+
+@app.post("/api/killswitch/toggle")
+def killswitch_toggle(enabled: bool = True):
+    """Enable or disable manual kill switch."""
+    success = kill_switch.set_manual_kill(enabled)
+    return {
+        "success": success,
+        "manual_kill_enabled": enabled,
+        "trading_allowed": kill_switch.is_trading_allowed()
+    }
+
+@app.get("/api/killswitch/check")
+def killswitch_check():
+    """Quick check if trading is allowed."""
+    return {"trading_allowed": kill_switch.is_trading_allowed()}
+
+# ==========================================
+# PER-BOT RISK STATUS ENDPOINTS
+# ==========================================
+
+@app.get("/api/risk/bots")
+def risk_all_bots():
+    """Get risk status for all bots (Hunter, Trader, Sniper)."""
+    return bot_risk.get_all_status()
+
+@app.get("/api/risk/hunter")
+def risk_hunter():
+    """Get Hunter bot risk status."""
+    return {
+        "bot_type": "HUNTER",
+        "can_trade": hunter_risk.is_trading_allowed,
+        "daily_pnl": hunter_risk.daily_pnl,
+        "trades_today": hunter_risk.trades_today,
+        "in_cooldown": hunter_risk.is_in_cooldown(),
+        "cooldown_remaining": hunter_risk.get_cooldown_remaining(),
+        "consecutive_losses": hunter_risk.consecutive_losses,
+        "limits": hunter_risk.limits.dict()
+    }
+
+@app.get("/api/risk/trader")
+def risk_trader():
+    """Get Trader bot risk status."""
+    return {
+        "bot_type": "TRADER",
+        "can_trade": trader_risk.is_trading_allowed,
+        "daily_pnl": trader_risk.daily_pnl,
+        "trades_today": trader_risk.trades_today,
+        "in_cooldown": trader_risk.is_in_cooldown(),
+        "cooldown_remaining": trader_risk.get_cooldown_remaining(),
+        "consecutive_losses": trader_risk.consecutive_losses,
+        "limits": trader_risk.limits.dict()
+    }
+
+@app.get("/api/risk/sniper")
+def risk_sniper():
+    """Get Sniper bot risk status."""
+    return {
+        "bot_type": "SNIPER",
+        "can_trade": sniper_risk.is_trading_allowed,
+        "daily_pnl": sniper_risk.daily_pnl,
+        "trades_today": sniper_risk.trades_today,
+        "in_cooldown": sniper_risk.is_in_cooldown(),
+        "cooldown_remaining": sniper_risk.get_cooldown_remaining(),
+        "consecutive_losses": sniper_risk.consecutive_losses,
+        "limits": sniper_risk.limits.dict()
+    }
+
+# ==========================================
+# PAPER TRADING
 # ==========================================
 
 @app.get("/api/paper/account")
-async def get_paper_account():
-    """Get paper trading account summary"""
-    # Get current prices
-    current_prices = {}
-    for symbol in paper_trading.paper_account.positions.keys():
+async def paper_account():
+    prices = {}
+    for s in paper_trading.paper_account.positions:
         try:
-            ticker = await exchange.fetch_ticker(symbol)
-            current_prices[symbol] = ticker['last']
+            ticker = await exchange.fetch_ticker(s)
+            prices[s] = ticker["last"]
         except:
             pass
-    
-    return paper_trading.paper_account.get_account_summary(current_prices)
+    return paper_trading.paper_account.get_account_summary(prices)
+
+
+class PaperBuyRequest(BaseModel):
+    symbol: str
+    amount_usdt: float
+
+
+class PaperSellRequest(BaseModel):
+    symbol: str
+    percentage: float = 100
+
 
 @app.post("/api/paper/buy")
-async def paper_buy(request: dict):
-    """
-    Place paper trading buy order
-    
-    Body:
-        {
-            "symbol": "BTC/USDT",
-            "amount_usdt": 100
-        }
-    """
-    symbol = request.get('symbol')
-    amount_usdt = request.get('amount_usdt')
-    
-    if not symbol or not amount_usdt:
-        return {"status": "error", "message": "Missing symbol or amount_usdt"}
-    
-    # Get current price
+async def paper_buy(req: PaperBuyRequest):
+    """Execute paper buy order."""
     try:
-        ticker = await exchange.fetch_ticker(symbol)
-        current_price = ticker['last']
+        # Get current price
+        ticker = await exchange.fetch_ticker(req.symbol)
+        price = ticker["last"]
     except Exception as e:
-        return {"status": "error", "message": f"Failed to get price: {e}"}
+        return {"status": "failed", "reason": f"Failed to fetch price: {e}"}
     
-    # Check risk management
-    current_positions = len(paper_trading.paper_account.positions)
-    risk_check = risk_manager.can_open_position(
-        current_positions=current_positions,
-        current_capital=paper_trading.paper_account.balance,
-        new_position_value=amount_usdt
+    # Check risk before buy
+    open_positions = len(paper_trading.paper_account.positions)
+    wallet_balance = paper_trading.paper_account.balance
+    risk_check = risk_manager.can_open_position(open_positions, wallet_balance, req.amount_usdt)
+    
+    if not risk_check.get("approved", False):
+        return {"status": "rejected", "reasons": risk_check.get("reasons", ["Risk check failed"])}
+    
+    result = paper_trading.paper_account.place_market_buy(
+        req.symbol, req.amount_usdt, price
     )
-    
-    if not risk_check['approved']:
-        return {
-            "status": "rejected",
-            "message": "Risk management check failed",
-            "reasons": risk_check['reasons']
-        }
-    
-    # Execute paper buy
-    result = paper_trading.paper_account.place_market_buy(symbol, amount_usdt, current_price)
-    
-    if result['status'] == 'success':
-        risk_manager.update_peak_capital(paper_trading.paper_account.balance)
-    
     return result
+
 
 @app.post("/api/paper/sell")
-async def paper_sell(request: dict):
-    """
-    Place paper trading sell order
-    
-    Body:
-        {
-            "symbol": "BTC/USDT",
-            "percentage": 100
-        }
-    """
-    symbol = request.get('symbol')
-    percentage = request.get('percentage', 100)
-    
-    if not symbol:
-        return {"status": "error", "message": "Missing symbol"}
-    
-    # Get current price
+async def paper_sell(req: PaperSellRequest):
+    """Execute paper sell order."""
     try:
-        ticker = await exchange.fetch_ticker(symbol)
-        current_price = ticker['last']
+        ticker = await exchange.fetch_ticker(req.symbol)
+        price = ticker["last"]
     except Exception as e:
-        return {"status": "error", "message": f"Failed to get price: {e}"}
+        return {"status": "failed", "reason": f"Failed to fetch price: {e}"}
     
-    # Execute paper sell
-    result = paper_trading.paper_account.place_market_sell(symbol, percentage, current_price)
-    
-    if result['status'] == 'success' and 'trade' in result:
-        # Record trade P&L for risk tracking
-        risk_manager.record_trade_pnl(result['trade']['profit'])
-        risk_manager.update_peak_capital(paper_trading.paper_account.balance)
-    
+    result = paper_trading.paper_account.place_market_sell(
+        req.symbol, req.percentage, price
+    )
     return result
 
+
 @app.post("/api/paper/reset")
-def reset_paper_account(request: dict):
-    """Reset paper trading account"""
-    new_balance = request.get('balance', PAPER_INITIAL_BALANCE)
-    paper_trading.paper_account.reset_account(new_balance)
-    risk_manager.initial_capital = new_balance
-    risk_manager.peak_capital = new_balance
-    risk_manager.daily_pnl = 0
-    return {"status": "success", "message": f"Account reset to ${new_balance}"}
+async def paper_reset():
+    """Reset paper trading account."""
+    paper_trading.paper_account.reset_account(PAPER_INITIAL_BALANCE)
+    return {"status": "reset", "balance": PAPER_INITIAL_BALANCE}
+
 
 @app.get("/api/paper/orders")
-def get_paper_orders():
-    """Get paper trading order history"""
+async def paper_orders():
+    """Get paper trading order history."""
     return paper_trading.paper_account.orders_history
 
+
 @app.get("/api/paper/trades")
-def get_paper_trades():
-    """Get completed paper trades"""
+async def paper_trades():
+    """Get paper trading trade history."""
     return paper_trading.paper_account.trades_history
 
-# ==========================================
-# 🆕 FEE CALCULATOR ENDPOINTS
-# ==========================================
-
-@app.post("/api/fee/calculate-buy")
-def calculate_buy_fee(request: dict):
-    """
-    Calculate buy cost with fees
-    
-    Body:
-        {
-            "amount_usdt": 100,
-            "price": 50000,
-            "order_type": "market"
-        }
-    """
-    return fee_calc.calculate_buy_cost(
-        request.get('amount_usdt'),
-        request.get('price'),
-        request.get('order_type', 'market')
-    )
-
-@app.post("/api/fee/calculate-sell")
-def calculate_sell_fee(request: dict):
-    """
-    Calculate sell proceeds with fees
-    
-    Body:
-        {
-            "asset_amount": 0.002,
-            "price": 50000,
-            "order_type": "market"
-        }
-    """
-    return fee_calc.calculate_sell_proceeds(
-        request.get('asset_amount'),
-        request.get('price'),
-        request.get('order_type', 'market')
-    )
-
-@app.post("/api/fee/round-trip")
-def calculate_round_trip(request: dict):
-    """
-    Calculate round-trip cost (buy + sell)
-    
-    Body:
-        {
-            "amount_usdt": 100,
-            "price": 50000
-        }
-    """
-    return fee_calc.calculate_round_trip_cost(
-        request.get('amount_usdt'),
-        request.get('price')
-    )
-
-@app.post("/api/fee/profit-target")
-def calculate_profit_target(request: dict):
-    """
-    Calculate target sell price for desired profit
-    
-    Body:
-        {
-            "buy_price": 50000,
-            "amount": 0.002,
-            "target_profit_pct": 5
-        }
-    """
-    return fee_calc.calculate_profit_target(
-        request.get('buy_price'),
-        request.get('amount'),
-        request.get('target_profit_pct')
-    )
 
 # ==========================================
-# 🆕 RISK MANAGEMENT ENDPOINTS
-# ==========================================
-
-@app.post("/api/risk/position-size")
-def calculate_position_size(request: dict):
-    """
-    Calculate optimal position size
-    
-    Body:
-        {
-            "capital": 1000,
-            "entry_price": 50000,
-            "stop_loss_price": 48500
-        }
-    """
-    return risk_manager.calculate_position_size(
-        request.get('capital'),
-        request.get('entry_price'),
-        request.get('stop_loss_price')
-    )
-
-@app.get("/api/risk/summary")
-async def get_risk_summary():
-    """Get risk management summary"""
-    # Get current prices for paper account
-    current_prices = {}
-    for symbol in paper_trading.paper_account.positions.keys():
-        try:
-            ticker = await exchange.fetch_ticker(symbol)
-            current_prices[symbol] = ticker['last']
-        except:
-            pass
-    
-    equity = paper_trading.paper_account.get_total_equity(current_prices)
-    open_positions = len(paper_trading.paper_account.positions)
-    
-    return risk_manager.get_risk_summary(equity, open_positions)
-
-@app.post("/api/risk/kelly")
-def calculate_kelly(request: dict):
-    """
-    Calculate Kelly Criterion
-    
-    Body:
-        {
-            "win_rate": 55,
-            "avg_win": 50,
-            "avg_loss": 30
-        }
-    """
-    return risk_manager.calculate_kelly_criterion(
-        request.get('win_rate'),
-        request.get('avg_win'),
-        request.get('avg_loss')
-    )
-
-# ==========================================
-# 🆕 MODE SWITCHING ENDPOINTS
+# BOT MODE
 # ==========================================
 
 @app.get("/api/bot/mode")
-def get_bot_mode():
-    """Get current bot mode"""
+async def bot_mode():
+    """Get current bot mode (LIVE/PAPER/BACKTEST)."""
+    return {"mode": BOT_MODE}
+
+
+# ==========================================
+# FEE CALCULATOR
+# ==========================================
+
+class FeeCalcRequest(BaseModel):
+    amount: float
+    price: float
+    is_maker: bool = False
+
+
+@app.post("/api/fee/calculate-buy")
+async def fee_calculate_buy(req: FeeCalcRequest):
+    """Calculate buy fees."""
+    order_type = 'limit' if req.is_maker else 'market'
+    result = fee_calc.calculate_buy_cost(req.amount, req.price, order_type)
+    return result
+
+
+@app.post("/api/fee/calculate-sell")
+async def fee_calculate_sell(req: FeeCalcRequest):
+    """Calculate sell fees."""
+    order_type = 'limit' if req.is_maker else 'market'
+    result = fee_calc.calculate_sell_proceeds(req.amount, req.price, order_type)
+    return result
+
+
+class RoundTripRequest(BaseModel):
+    amount: float
+    buy_price: float
+    sell_price: float = None
+    is_maker: bool = False
+
+
+@app.post("/api/fee/round-trip")
+async def fee_round_trip(req: RoundTripRequest):
+    """Calculate round-trip (buy+sell) fees and profit."""
+    result = fee_calc.calculate_round_trip_cost(req.amount, req.buy_price)
+    return result
+
+
+class ProfitTargetRequest(BaseModel):
+    amount: float
+    entry_price: float
+    target_profit_pct: float
+    is_maker: bool = False
+
+
+@app.post("/api/fee/profit-target")
+async def fee_profit_target(req: ProfitTargetRequest):
+    """Calculate price needed to hit profit target after fees."""
+    result = fee_calc.calculate_profit_target(
+        req.entry_price, req.amount, req.target_profit_pct
+    )
+    return result
+
+
+# ==========================================
+# RISK MANAGEMENT ENDPOINTS
+# ==========================================
+
+class PositionSizeRequest(BaseModel):
+    entry_price: float
+    stop_loss_price: float
+    portfolio_value: float = None
+
+
+@app.post("/api/risk/position-size")
+async def risk_position_size(req: PositionSizeRequest):
+    """Calculate optimal position size based on risk."""
+    portfolio = req.portfolio_value or risk_manager.current_equity
+    size = risk_manager.calculate_position_size(
+        portfolio, req.entry_price, req.stop_loss_price
+    )
     return {
-        "mode": BOT_MODE,
-        "description": {
-            "LIVE": "Real money trading (DANGEROUS)",
-            "PAPER": "Virtual money trading (SAFE)",
-            "BACKTEST": "Historical data testing"
-        }.get(BOT_MODE, "Unknown")
+        "position_size": size,
+        "portfolio_value": portfolio,
+        "risk_per_trade_pct": risk_manager.limits.risk_per_trade_pct,
     }
 
+
+@app.get("/api/risk/summary")
+async def risk_summary():
+    """Get current risk summary."""
+    # Try to get current equity from paper trading
+    try:
+        prices = {}
+        for s in paper_trading.paper_account.positions:
+            try:
+                prices[s] = (await exchange.fetch_ticker(s))["last"]
+            except:
+                pass
+        summary = paper_trading.paper_account.get_account_summary(prices)
+        current_equity = summary.get("total_equity", risk_manager.current_equity)
+    except:
+        current_equity = risk_manager.current_equity
+    
+    return risk_manager.get_risk_summary(current_equity)
+
+
+@app.get("/api/risk/kelly")
+async def risk_kelly():
+    """Calculate Kelly criterion position size."""
+    # Get historical win rate from trades
+    trades = database.get_trades(limit=100)
+    if not trades:
+        return {"kelly_pct": 0, "message": "No trade history"}
+    
+    wins = sum(1 for t in trades if t.get("profit_usdt", 0) > 0)
+    win_rate = wins / len(trades) if trades else 0.5
+    
+    # Calculate average win/loss ratio
+    winning_trades = [t for t in trades if t.get("profit_usdt", 0) > 0]
+    losing_trades = [t for t in trades if t.get("profit_usdt", 0) < 0]
+    
+    avg_win = sum(t.get("profit_usdt", 0) for t in winning_trades) / len(winning_trades) if winning_trades else 1
+    avg_loss = abs(sum(t.get("profit_usdt", 0) for t in losing_trades) / len(losing_trades)) if losing_trades else 1
+    
+    win_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 1
+    
+    # Kelly formula: K% = W - [(1-W)/R]
+    kelly = win_rate - ((1 - win_rate) / win_loss_ratio) if win_loss_ratio > 0 else 0
+    kelly = max(0, min(kelly, 0.25))  # Cap at 25%
+    
+    return {
+        "kelly_pct": round(kelly * 100, 2),
+        "win_rate": round(win_rate * 100, 2),
+        "win_loss_ratio": round(win_loss_ratio, 2),
+        "trades_analyzed": len(trades),
+    }
+
+
 # ==========================================
-# 🆕 ANALYTICS ENDPOINTS
+# BACKTEST ENDPOINTS
 # ==========================================
 
-@app.get("/api/analytics/solana")
-def get_solana_analytics(
-    start_date: str = None,
-    end_date: str = None,
-    timeframe: str = "daily"
-):
-    """
-    Get Solana trading analytics with profit/loss calculations
-    
-    Query Parameters:
-        - start_date: ISO format (YYYY-MM-DD) - optional
-        - end_date: ISO format (YYYY-MM-DD) - optional
-        - timeframe: 'daily' (default), 'weekly', 'monthly', 'yearly'
-    
-    Returns:
-        {
-            "data": [
-                {
-                    "date": "2024-01-01",
-                    "profit_sol": 0.5,
-                    "profit_usd": 100,
-                    "cumulative_profit_sol": 0.5,
-                    "cumulative_profit_usd": 100
-                },
-                ...
-            ],
-            "summary": {
-                "total_profit_sol": 5.0,
-                "total_profit_usd": 1000.0,
-                "total_loss_sol": -2.0,
-                "total_loss_usd": -400.0,
-                "net_profit_sol": 3.0,
-                "net_profit_usd": 600.0,
-                "total_trades": 20,
-                "winning_trades": 15,
-                "losing_trades": 5,
-                "win_rate": 75.0
-            }
-        }
-    """
-    # Get current SOL price (default 200, should be fetched from API)
-    sol_price = 200.0
-    
-    result = analytics.calculate_solana_analytics(
-        start_date=start_date,
-        end_date=end_date,
-        timeframe=timeframe,
-        sol_to_usd=sol_price
+class BacktestRequest(BaseModel):
+    symbol: str
+    strategy: str = "RSI_MACD"
+    start_date: str = None
+    end_date: str = None
+    initial_capital: float = 1000
+    timeframe: str = "1m"
+
+
+@app.post("/api/backtest/run")
+async def backtest_run(req: BacktestRequest):
+    """Run a backtest."""
+    try:
+        result = await backtesting.run_backtest(
+            symbol=req.symbol,
+            strategy=req.strategy,
+            start_date=req.start_date,
+            end_date=req.end_date,
+            initial_capital=req.initial_capital,
+            timeframe=req.timeframe,
+        )
+        # Save result
+        database.save_backtest_result(result)
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+class BatchBacktestRequest(BaseModel):
+    symbols: list
+    strategy: str = "RSI_MACD"
+    initial_capital: float = 1000
+
+
+@app.post("/api/backtest/batch")
+async def backtest_batch(req: BatchBacktestRequest):
+    """Run batch backtest on multiple symbols."""
+    results = []
+    for symbol in req.symbols:
+        try:
+            result = await backtesting.run_backtest(
+                symbol=symbol,
+                strategy=req.strategy,
+                initial_capital=req.initial_capital,
+            )
+            results.append(result)
+        except Exception as e:
+            results.append({"symbol": symbol, "error": str(e)})
+    return {"results": results}
+
+
+@app.get("/api/backtest/history")
+async def backtest_history():
+    """Get backtest history."""
+    return {"history": database.get_backtest_history()}
+
+
+# ==========================================
+# SOLANA ENDPOINTS
+# ==========================================
+
+class QuoteRequest(BaseModel):
+    input_token: str = "SOL"
+    output_token: str
+    amount: float
+    slippage_bps: int = 100
+
+
+@app.post("/api/solana/quote")
+async def solana_quote(req: QuoteRequest):
+    """Get Jupiter swap quote."""
+    quote = await jupiter_bot.get_quote(
+        req.input_token, req.output_token, req.amount, req.slippage_bps
     )
-    
+    return quote
+
+
+class SwapRequest(BaseModel):
+    quote_response: dict
+
+
+@app.post("/api/solana/swap")
+async def solana_swap(req: SwapRequest):
+    """Execute Jupiter swap."""
+    result = await jupiter_bot.execute_swap(req.quote_response)
     return result
 
 
-@app.get("/api/analytics/tokocrypto")
-def get_tokocrypto_analytics(
-    start_date: str = None,
-    end_date: str = None,
-    timeframe: str = "daily"
-):
-    """
-    Get Tokocrypto trading analytics with profit/loss calculations
-    
-    Query Parameters:
-        - start_date: ISO format (YYYY-MM-DD) - optional
-        - end_date: ISO format (YYYY-MM-DD) - optional
-        - timeframe: 'daily' (default), 'weekly', 'monthly', 'yearly'
-    
-    Returns:
-        {
-            "data": [
-                {
-                    "date": "2024-01-01",
-                    "profit_usdt": 100,
-                    "cumulative_profit": 100
-                },
-                ...
-            ],
-            "summary": {
-                "total_profit_usdt": 500,
-                "total_loss_usdt": -200,
-                "net_profit_usdt": 300,
-                "total_trades": 20,
-                "winning_trades": 15,
-                "losing_trades": 5,
-                "win_rate": 75.0
-            }
+@app.post("/api/solana/auto/toggle")
+async def solana_auto_toggle(background_tasks: BackgroundTasks):
+    """Toggle Solana auto trading bot."""
+    if solana_auto.is_running:
+        solana_auto.stop()
+        return {"status": "stopped"}
+    else:
+        background_tasks.add_task(solana_auto.start, "AUTO_HUNT")
+        return {"status": "started"}
+
+
+@app.get("/api/solana/auto/status")
+async def solana_auto_status():
+    """Get Solana auto bot status."""
+    return {
+        "is_running": solana_auto.is_running,
+        "mode": solana_auto.mode,
+        "target_token": solana_auto.target_token,
+        "active_positions": len(solana_auto.active_positions),
+        "positions": solana_auto.active_positions,
+    }
+
+
+# ==========================================
+# SYSTEM LOGS
+# ==========================================
+
+@app.get("/api/system/logs")
+async def system_logs():
+    """Get recent system logs."""
+    return {"logs": sys_logger.get_logs()}
+
+
+# ==========================================
+# TOKOCRYPTO PRICE
+# ==========================================
+
+@app.get("/api/toko/price/{symbol}")
+async def toko_price(symbol: str):
+    """Get current price from Tokocrypto."""
+    try:
+        ticker = await exchange.fetch_ticker(symbol)
+        return {
+            "symbol": symbol,
+            "price": ticker["last"],
+            "bid": ticker.get("bid"),
+            "ask": ticker.get("ask"),
+            "volume": ticker.get("baseVolume"),
         }
-    """
-    result = analytics.calculate_tokocrypto_analytics(
-        start_date=start_date,
-        end_date=end_date,
-        timeframe=timeframe
-    )
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ==========================================
+# ANALYTICS ENDPOINTS
+# ==========================================
+
+@app.get("/api/analytics/summary")
+async def analytics_summary():
+    """Get trading analytics summary."""
+    return analytics.get_analytics_summary()
+
+
+@app.get("/api/analytics/performance")
+async def analytics_performance():
+    """Get performance metrics."""
+    return analytics.get_performance_metrics()
+
+
+@app.get("/api/analytics/daily")
+async def analytics_daily():
+    """Get daily P&L breakdown."""
+    return analytics.get_daily_pnl()
+
+
+# ==========================================
+# BOT MANAGER & UNIFIED POSITIONS (P5)
+# ==========================================
+
+from bot_manager import bot_registry, position_tracker, rotate_logs, archive_old_trades
+
+
+@app.get("/api/bots")
+async def list_bots():
+    """Get status of all registered bots."""
+    return {
+        "bots": bot_registry.get_status(),
+        "running": bot_registry.get_running_bots(),
+    }
+
+
+@app.post("/api/bots/{name}/start")
+async def start_bot(name: str, background_tasks: BackgroundTasks):
+    """Start a specific bot."""
+    bot = bot_registry.get(name)
+    if not bot:
+        return {"error": f"Bot '{name}' not found"}
     
-    return result
+    if bot.is_running:
+        return {"error": f"Bot '{name}' is already running"}
+    
+    background_tasks.add_task(bot.start)
+    return {"status": "starting", "bot": name}
+
+
+@app.post("/api/bots/{name}/stop")
+async def stop_bot(name: str):
+    """Stop a specific bot."""
+    bot = bot_registry.get(name)
+    if not bot:
+        return {"error": f"Bot '{name}' not found"}
+    
+    bot.stop()
+    return {"status": "stopped", "bot": name}
+
+
+class BotConfigUpdate(BaseModel):
+    config: dict
+
+
+@app.post("/api/bots/{name}/config")
+async def update_bot_config(name: str, update: BotConfigUpdate):
+    """Hot-reload bot configuration without restart."""
+    bot = bot_registry.get(name)
+    if not bot:
+        return {"error": f"Bot '{name}' not found"}
+    
+    bot_registry.update_bot_config(name, update.config)
+    return {"status": "updated", "bot": name, "config": update.config}
+
+
+@app.get("/api/positions")
+async def unified_positions():
+    """Get all positions across all bots."""
+    return position_tracker.get_summary()
+
+
+@app.get("/api/positions/{bot_type}")
+async def positions_by_bot(bot_type: str):
+    """Get positions for a specific bot type."""
+    positions = position_tracker.get_by_bot_type(bot_type.upper())
+    return {
+        "bot_type": bot_type.upper(),
+        "count": len(positions),
+        "positions": [p.to_dict() for p in positions],
+    }
+
+
+@app.post("/api/maintenance/logs")
+async def run_log_rotation():
+    """Manually trigger log rotation."""
+    rotate_logs(max_entries=500)
+    return {"status": "success", "message": "Logs rotated"}
+
+
+@app.post("/api/maintenance/archive")
+async def run_archive():
+    """Manually trigger trade archiving."""
+    count = archive_old_trades(days_old=30)
+    return {"status": "success", "archived_trades": count}
+
+
+@app.get("/api/strategy/quality")
+async def strategy_quality():
+    """Get signal quality statistics for all strategies."""
+    return strategy.get_signal_quality_stats()

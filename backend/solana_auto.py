@@ -2,314 +2,402 @@ import asyncio
 import json
 import os
 import time
-from datetime import datetime
+from typing import List, Dict, Optional
 
 import aiohttp
 import pandas as pd
-import pandas_ta as ta
-from solders.pubkey import Pubkey  # Import baru untuk cek desimal
+from solders.pubkey import Pubkey
 
 from jupiter_handler import jupiter_bot, TOKENS
 import solana_tracker
 from solana_scanner import scanner
 from solana_safety import safety_checker
-import sys_logger 
-import strategy
+import sys_logger
 
+from strategies.solana_trader import SolanaTraderStrategy
+from risk_manager import RiskManager, BotType, BOT_RISK_PROFILES
+
+
+# =============================
+# CONFIG
+# =============================
 POSITIONS_FILE = "solana_positions.json"
-TRADE_AMOUNT_SOL = 0.015  # Jumlah SOL per trade
-MAX_POSITIONS = 10  # Maksimal posisi bersamaan
+MAX_POSITIONS = 3  # Max 3 concurrent positions per P2
+CANDLE_LIMIT = 120
 
-STRATEGY_RULES = {
-    "SNIPER": {
-        # Strategi Judi (JANGAN DIPAKAI DULU)
-        "tp_pct": 200.0,
-        "sl_pct": -50.0,
-        "slippage_bps": 2000
-    },
-    "TRADER": {
-        # Strategi Alpha Hunter (REKOMENDASI)
-        "tp_pct": 30.0,     # Ambil profit di 30% (Cukup sering terjadi saat pump)
-        "sl_pct": -15.0,    # Cut loss di 15% (Jangan biarkan rugi dalam)
-        "slippage_bps": 500, # Slippage 5% (Wajar untuk koin liquid)
-        "trailing_stop": True # Aktifkan trailing stop jika nanti sudah profit
-    }
-}
+# Position Sizing Config (P2 Fix)
+POSITION_SIZE_PCT = 0.015  # 1.5% of portfolio per trade
+DEFAULT_SOL_BALANCE = 1.0  # Fallback if balance fetch fails
+MIN_TRADE_SOL = 0.01       # Minimum trade size
+MAX_TRADE_SOL = 0.1        # Maximum trade size (safety cap)
 
+
+# =============================
+# SOLANA AUTO BOT
+# =============================
 class SolanaAutoBot:
     def __init__(self):
         self.is_running = False
         self.mode = "MANUAL_TARGET"
-        self.strategy = "TRADER"
-        self.target_token = "USDC"
-        self.target_address = None
-        self.target_pair_address = None
+        self.strategy_name = "TRADER"
+
+        self.target_token: Optional[str] = None
+        self.target_address: Optional[str] = None
+        self.target_pair_address: Optional[str] = None
+
+        self.active_positions: List[Dict] = []
+        self.recently_sold: List[str] = []
+
+        self.trader_strategy = SolanaTraderStrategy()
         
-        self.active_positions = [] 
-        self.recently_sold = [] 
+        # Track SOL balance for percentage-based sizing
+        self.cached_sol_balance = DEFAULT_SOL_BALANCE
+        
+        # NEW: Per-bot risk manager for Trader
+        self.risk_manager = RiskManager(
+            initial_balance=100.0,  # SOL balance estimate
+            bot_type=BotType.TRADER
+        )
+        
         self.load_positions()
 
+    # =============================
+    # POSITION STORAGE
+    # =============================
     def load_positions(self):
-        if os.path.exists(POSITIONS_FILE):
-            try:
-                with open(POSITIONS_FILE, 'r') as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        self.active_positions = [data]
-                    elif isinstance(data, list):
-                        self.active_positions = data
-                    else:
-                        self.active_positions = []
-                        
-                    if self.active_positions:
-                        sys_logger.add_log(f"📂 Loaded {len(self.active_positions)} active positions")
-            except Exception as e:
-                sys_logger.add_log(f"⚠️ Load Error: {e}")
-                self.active_positions = []
+        if not os.path.exists(POSITIONS_FILE):
+            self.active_positions = []
+            return
+
+        try:
+            with open(POSITIONS_FILE, "r") as f:
+                data = json.load(f)
+                self.active_positions = data if isinstance(data, list) else []
+            sys_logger.add_log(f"📂 Loaded {len(self.active_positions)} positions")
+        except Exception as e:
+            sys_logger.add_log(f"⚠️ Position load failed: {e}")
+            self.active_positions = []
 
     def save_positions(self):
-        with open(POSITIONS_FILE, 'w') as f:
+        with open(POSITIONS_FILE, "w") as f:
             json.dump(self.active_positions, f, indent=4)
 
-    def add_position(self, pos):
+    def add_position(self, pos: Dict):
         self.active_positions.append(pos)
         self.save_positions()
 
-    def remove_position(self, token_symbol):
-        self.active_positions = [p for p in self.active_positions if p['token'] != token_symbol]
+    def remove_position(self, token: str):
+        self.active_positions = [
+            p for p in self.active_positions if p["token"] != token
+        ]
         self.save_positions()
 
-    def _get_strategy_config(self, strategy_name=None):
-        name = (strategy_name or self.strategy or "TRADER").upper()
-        return STRATEGY_RULES.get(name, STRATEGY_RULES["TRADER"])
-
-    # --- HELPER: GET DECIMALS (FIX PNL BUG) ---
-    async def get_token_decimals(self, address: str):
-        """Ambil desimal token langsung dari Blockchain untuk fix kalkulasi."""
+    # =============================
+    # SOL BALANCE FOR POSITION SIZING (P2 FIX)
+    # =============================
+    async def refresh_sol_balance(self) -> float:
+        """Fetch current SOL balance for percentage-based position sizing."""
         try:
-            # Menggunakan client RPC yang sudah ada di safety_checker
-            resp = await safety_checker.client.get_token_supply(Pubkey.from_string(address))
-            return resp.value.decimals
+            balances = await jupiter_bot.get_all_balances()
+            if balances and isinstance(balances, dict):
+                sol_balance = balances.get("SOL", 0)
+                if sol_balance > 0:
+                    self.cached_sol_balance = sol_balance
+                    return sol_balance
         except Exception as e:
-            # sys_logger.add_log(f"⚠️ Decimals check fail: {e}")
-            return 6  # Default fallback untuk memecoins (biasanya 6)
+            sys_logger.add_log(f"⚠️ Balance fetch failed: {e}")
+        return self.cached_sol_balance
+    
+    def calculate_position_size(self, balance: float) -> float:
+        """Calculate position size as percentage of portfolio (P2 Fix)."""
+        size = balance * POSITION_SIZE_PCT
+        # Apply min/max caps for safety
+        size = max(MIN_TRADE_SOL, min(MAX_TRADE_SOL, size))
+        return round(size, 6)
 
-    # --- API HELPER (GeckoTerminal) ---
-    async def _fetch_candles(self, pair_address: str, interval="1m", limit=100):
-        if not pair_address: return None
-        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/minute?limit={limit}"
-        
+    # =============================
+    # TOKEN DECIMALS (CRITICAL FIX)
+    # =============================
+    async def get_token_decimals(self, address: str) -> int:
+        try:
+            resp = await safety_checker.client.get_token_supply(
+                Pubkey.from_string(address)
+            )
+            return int(resp.value.decimals)
+        except Exception:
+            # fallback memecoin
+            return 6
+
+    # =============================
+    # MARKET DATA (GECKOTERMINAL)
+    # =============================
+    async def _fetch_candles(self, pool_id: str, limit: int = CANDLE_LIMIT):
+        url = (
+            "https://api.geckoterminal.com/api/v2/"
+            f"networks/solana/pools/{pool_id}/ohlcv/minute"
+            f"?limit={limit}"
+        )
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=10) as resp:
-                    if resp.status != 200: return None
+                    if resp.status != 200:
+                        sys_logger.add_log(f"❌ Candle HTTP {resp.status}")
+                        return None
                     data = await resp.json()
-            
-            ohlcv_list = data.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
-            if not ohlcv_list: return None
-                
-            df = pd.DataFrame(ohlcv_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df = df.sort_values('timestamp').reset_index(drop=True)
+
+            rows = data["data"]["attributes"]["ohlcv_list"]
+            df = pd.DataFrame(
+                rows,
+                columns=["ts", "open", "high", "low", "close", "volume"]
+            )
+            df.sort_values("ts", inplace=True)
+            df.reset_index(drop=True, inplace=True)
             return df
-        except: return None
 
-    def _technical_buy_signal(self, df):
-        try:
-            if len(df) < 20: return False, f"Not enough data: {len(df)}"
-            df = df.copy()
-            
-            df.ta.rsi(length=14, append=True)
-            df.ta.macd(fast=12, slow=26, signal=9, append=True)
-            df.ta.bbands(length=20, std=2, append=True)
-            
-            cols = df.columns
-            rsi_col = next((c for c in cols if c.startswith('RSI')), None)
-            macd_col = next((c for c in cols if c.startswith('MACD_') and not c.startswith('MACDs')), None)
-            sig_col = next((c for c in cols if c.startswith('MACDs_')), None)
-            low_bb = next((c for c in cols if c.startswith('BBL_')), None)
-            
-            if not all([rsi_col, macd_col, sig_col, low_bb]):
-                return False, "Indicator calculation failed"
+        except Exception as e:
+            sys_logger.add_log(f"❌ Candle fetch error: {e}")
+            return None
 
-            last = df.iloc[-1]
-            votes = []
-            
-            if last[rsi_col] < 40: votes.append("RSI") 
-            if last[macd_col] > last[sig_col]: votes.append("MACD")
-            if last['close'] <= last[low_bb] * 1.05: votes.append("BB")
-            
-            if len(votes) >= 2: return True, f"Strong: {', '.join(votes)}"
-            return False, f"Weak ({len(votes)}/3)"
-        except Exception as e: return False, str(e)
+    # =============================
+    # MAIN LOOP
+    # =============================
+    async def start(self, mode="MANUAL_TARGET", token_symbol=None):
+        if self.is_running:
+            return
 
-    # --- LOGIKA UTAMA ---
-    async def start(self, mode="MANUAL_TARGET", token_symbol=None, strategy="TRADER"):
-        if self.is_running: return
         self.is_running = True
         self.mode = mode
-        self.strategy = (strategy or "TRADER").upper()
-        if token_symbol: self.target_token = token_symbol
-        sys_logger.add_log(f"🚀 AUTO STARTED: {mode} | Strategy: {self.strategy} (Max {MAX_POSITIONS} slots)")
-        
+
+        if token_symbol:
+            self.target_token = token_symbol
+
+        sys_logger.add_log(
+            f"🚀 AUTO STARTED | Mode={mode} Strategy=SOLANA_TRADER"
+        )
+
         while self.is_running:
             try:
                 await self.logic_loop()
             except Exception as e:
-                sys_logger.add_log(f"⚠️ Loop Error: {e}")
-            await asyncio.sleep(5) 
+                sys_logger.add_log(f"⚠️ Loop error: {e}")
+            await asyncio.sleep(5)
 
     def stop(self):
         self.is_running = False
         sys_logger.add_log("🛑 AUTO STOPPED")
 
+    # =============================
+    # CORE LOGIC
+    # =============================
     async def logic_loop(self):
+        # ---- exit management ----
         if self.active_positions:
             await self.check_all_exit_conditions()
 
-        current_count = len(self.active_positions)
-        if current_count < MAX_POSITIONS:
-            if self.mode == "AUTO_DISCOVERY":
-                held_tokens = [p['token'] for p in self.active_positions]
-                full_ignore_list = self.recently_sold + held_tokens
-                
-                gem = await scanner.find_gem(ignore_list=full_ignore_list, mode=self.strategy)
-                
-                if gem:
-                    self.target_token = gem['symbol']
-                    self.target_address = gem['address']
-                    self.target_pair_address = gem['pair_address']
-                    TOKENS[self.target_token] = self.target_address 
-                    sys_logger.add_log(f"🎯 Target Found: {self.target_token}")
-                    await self.do_buy()
-                else:
-                    await asyncio.sleep(2)
-            
-            elif self.mode == "MANUAL_TARGET" and current_count == 0:
-                await self.do_buy()
-                self.stop() 
+        # ---- RISK CHECK ----
+        if not self.risk_manager.can_trade_new():
+            if self.risk_manager.is_in_cooldown():
+                remaining = self.risk_manager.get_cooldown_remaining()
+                sys_logger.add_log(f"⏸️ Trader cooldown: {remaining}s remaining")
+            else:
+                sys_logger.add_log("⚠️ Trader risk limit reached")
+            return
 
+        if len(self.active_positions) >= MAX_POSITIONS:
+            return
+
+        # ---- AUTO DISCOVERY ----
+        if self.mode == "AUTO_DISCOVERY":
+            ignore = self.recently_sold + [
+                p["token"] for p in self.active_positions
+            ]
+
+            gem = await scanner.find_gem(
+                ignore_list=ignore,
+                mode="TRADER"
+            )
+
+            if not gem:
+                return
+
+            self.target_token = gem["symbol"]
+            self.target_address = gem["address"]
+            self.target_pair_address = gem["pair_address"]
+
+            TOKENS[self.target_token] = self.target_address
+
+            await self.do_buy()
+
+        # ---- MANUAL ----
+        elif self.mode == "MANUAL_TARGET" and not self.active_positions:
+            await self.do_buy()
+            self.stop()
+
+    # =============================
+    # BUY LOGIC
+    # =============================
     async def do_buy(self):
-        strategy_name = self.strategy
-        config = self._get_strategy_config()
-        sys_logger.add_log(f"⚔️ Analyzing {self.target_token} | Strategy: {strategy_name}")
+        if not all([
+            self.target_token,
+            self.target_address,
+            self.target_pair_address
+        ]):
+            sys_logger.add_log("❌ Target not fully defined")
+            return
 
-        def add_to_ignore(token):
-            self.recently_sold.append(token)
-            if len(self.recently_sold) > 50: self.recently_sold.pop(0)
+        sys_logger.add_log(f"⚔️ Analyzing {self.target_token}")
 
-        is_safe, reason, _ = await safety_checker.check_token(self.target_address)
+        # ---- SAFETY CHECK ----
+        is_safe, reason, _ = await safety_checker.check_token(
+            self.target_address
+        )
         if not is_safe:
-            sys_logger.add_log(f"🛑 Unsafe: {reason}")
-            if self.mode == "AUTO_DISCOVERY": add_to_ignore(self.target_token)
+            sys_logger.add_log(f"🛑 Unsafe token: {reason}")
             return
 
-        if strategy_name == "TRADER":
-            candles = await self._fetch_candles(self.target_pair_address)
-            if candles is None or len(candles) < 30:
-                sys_logger.add_log("⚠️ Not enough candles (<30m)")
-                if self.mode == "AUTO_DISCOVERY": add_to_ignore(self.target_token)
-                return
-                
-            is_buy, tech_reason = self._technical_buy_signal(candles)
-            if not is_buy:
-                sys_logger.add_log(f"⏸️ Technical Skip: {tech_reason}")
-                if self.mode == "AUTO_DISCOVERY": add_to_ignore(self.target_token) 
-                return
-        else:
-            sys_logger.add_log("⚡ SNIPER: skipping candle/TA checks, rug-check passed")
+        # ---- CANDLES ----
+        candles = await self._fetch_candles(self.target_pair_address)
+        if candles is None or candles.empty:
+            return
 
-        sys_logger.add_log(f"🛒 Executing Buy: {self.target_token} | Slippage {config['slippage_bps']/100:.2f}%")
-        # Use address for new tokens not in Jupiter registry, fallback to symbol
-        buy_token_param = self.target_address if self.target_address else self.target_token
-        quote = await jupiter_bot.get_quote("SOL", buy_token_param, TRADE_AMOUNT_SOL, slippage_bps=config["slippage_bps"])
-        
+        # ---- STRATEGY ----
+        should_buy, reason = self.trader_strategy.should_buy({
+            "token": self.target_token,
+            "df": candles
+        })
+
+        if not should_buy:
+            sys_logger.add_log(f"⏸️ Skip {self.target_token}: {reason}")
+            return
+
+        # ---- PERCENTAGE-BASED POSITION SIZING (P2 FIX) ----
+        sol_balance = await self.refresh_sol_balance()
+        trade_amount = self.calculate_position_size(sol_balance)
+        sys_logger.add_log(f"💰 Position size: {trade_amount:.4f} SOL ({POSITION_SIZE_PCT*100}% of {sol_balance:.4f})")
+
+        # ---- JUPITER QUOTE ----
+        quote = await jupiter_bot.get_quote(
+            "SOL",
+            self.target_address,
+            trade_amount,
+            slippage_bps=500
+        )
+
         if "error" in quote:
-            sys_logger.add_log(f"❌ Quote Error: {quote['error']}")
-            if self.mode == "AUTO_DISCOVERY": add_to_ignore(self.target_token)
+            sys_logger.add_log(f"❌ Quote error: {quote['error']}")
             return
-        
-        result = await jupiter_bot.execute_swap(quote['raw_data'])
-        
-        if result.get("status") == "success":
-            output_amount = float(quote['output_estimate'].replace(",", ""))
-            pos = {
-                "token": self.target_token,
-                "address": self.target_address,
-                "entry_price_sol": TRADE_AMOUNT_SOL,
-                "token_amount": output_amount,
-                "strategy": strategy_name,
-                "txid": result['txid'],
-                "timestamp": time.time()
-            }
-            self.add_position(pos)
-            solana_tracker.save_trade(result['txid'], "SOL", self.target_token, TRADE_AMOUNT_SOL, output_amount, token_address=self.target_address)
-            sys_logger.add_log(f"✅ BOUGHT {self.target_token}! Holding {len(self.active_positions)}/{MAX_POSITIONS}.")
-        else:
-            sys_logger.add_log("❌ Swap Failed")
 
+        # ---- EXECUTE BUY ----
+        res = await jupiter_bot.execute_swap(quote["raw_data"])
+        if res.get("status") != "success":
+            sys_logger.add_log("❌ Buy failed")
+            return
+
+        output_amt = float(quote["output_estimate"].replace(",", ""))
+
+        pos = {
+            "token": self.target_token,
+            "address": self.target_address,
+            "pair_address": self.target_pair_address,
+            "token_amount": output_amt,
+            "entry_price_sol": trade_amount,  # Use actual trade amount
+            "entry_time": time.time(),
+            "strategy": "SOLANA_TRADER",
+            "tp1_hit": False,
+            "txid": res["txid"]
+        }
+
+        self.trader_strategy.on_buy(pos)
+        self.add_position(pos)
+
+        solana_tracker.save_trade(
+            res["txid"],
+            "SOL",
+            self.target_token,
+            trade_amount,  # Use actual trade amount
+            output_amt,
+            token_address=self.target_address
+        )
+
+        sys_logger.add_log(f"✅ BOUGHT {self.target_token} for {trade_amount:.4f} SOL")
+
+    # =============================
+    # SELL LOGIC
+    # =============================
     async def check_all_exit_conditions(self):
-        for pos in self.active_positions[:]: 
+        for pos in self.active_positions[:]:
             await self.check_single_exit(pos)
 
-    async def check_single_exit(self, pos):
-        token = pos['token']
-        # Use address as priority, fallback to token symbol if address not available
-        token_address = pos.get('address') or pos['token']
-        amount = pos['token_amount']
-        
-        # --- FIX DECIMAL MISMATCH (1000x Error) ---
-        decimals = await self.get_token_decimals(token_address)
-        
-        # Jika bot handler mengira 9 desimal (standar SOL) tapi token cuma 6,
-        # kita harus menyesuaikan amount yang dikirim agar tidak dianggap 1000x lipat.
-        # Formula: Adjusted = RealAmount * (10^Decimals / 10^9)
-        adjusted_amount = amount
-        if decimals != 9:
-             adjusted_amount = amount * (10**decimals) / (10**9)
+    async def check_single_exit(self, pos: Dict):
+        token = pos["token"]
+        address = pos["address"]
+        amount = pos["token_amount"]
 
-           # Use token_address for quote (address > symbol fallback)
-           # This ensures new tokens not in Jupiter registry can still be quoted after restart
-        quote = await jupiter_bot.get_quote(token_address, "SOL", adjusted_amount)
-        
-        if "error" in quote: return 
-        price_per_token = float(quote['output_estimate'].replace(",", ""))
-        
-        if price_per_token <= 0: return 
-        
-        current_value_sol = price_per_token # Ini adalah TOTAL SOL (karena kita minta quote all)
-        initial_capital = pos['entry_price_sol']
-        pnl_pct = ((current_value_sol - initial_capital) / initial_capital) * 100
-        
-        pos_strategy = (pos.get("strategy") or self.strategy or "TRADER").upper()
-        cfg = self._get_strategy_config(pos_strategy)
+        decimals = await self.get_token_decimals(address)
 
-        should_sell = False
-        reason = ""
-        
-        if pnl_pct >= cfg["tp_pct"]:
-            should_sell = True
-            reason = f"✅ TP Hit {pos_strategy} (+{pnl_pct:.2f}%)"
-        elif pnl_pct <= cfg["sl_pct"]:
-            should_sell = True
-            reason = f"❌ SL Hit {pos_strategy} ({pnl_pct:.2f}%)"
-        
-        if should_sell:
-            sys_logger.add_log(f"🚨 Selling {token}: {reason}")
-            
-            # Gunakan adjusted_amount yang sama untuk eksekusi
-            # Kita perlu re-fetch quote jika logic swap handler tidak support override amount,
-            # tapi execute_swap pakai 'raw_data' dari quote di atas, jadi aman.
-            
-            res = await jupiter_bot.execute_swap(quote['raw_data'])
-            
-            if res.get("status") == "success":
-                sys_logger.add_log(f"✅ SOLD {token}!")
-                solana_tracker.save_trade("SELL", token, "SOL", amount, current_value_sol, status=reason, token_address=token_address)
-                self.remove_position(token)
-                
-                self.recently_sold.append(token)
-                if len(self.recently_sold) > 50: self.recently_sold.pop(0)
-            else:
-                sys_logger.add_log(f"❌ Sell Fail: {res.get('message')}")
+        # Jupiter expects raw token amount
+        adjusted_amount = (
+            amount * (10 ** decimals) / (10 ** 9)
+            if decimals != 9 else amount
+        )
 
+        quote = await jupiter_bot.get_quote(
+            address,
+            "SOL",
+            adjusted_amount
+        )
+
+        if "error" in quote:
+            return
+
+        current_sol = float(quote["output_estimate"].replace(",", ""))
+        entry = pos["entry_price_sol"]
+        pnl_pct = ((current_sol - entry) / entry) * 100
+
+        pos["pnl_pct"] = pnl_pct
+
+        should_sell, reason = self.trader_strategy.should_sell(
+            pos,
+            market={}
+        )
+
+        if not should_sell:
+            return
+
+        sys_logger.add_log(f"🚨 SELL {token}: {reason}")
+
+        res = await jupiter_bot.execute_swap(quote["raw_data"])
+        if res.get("status") != "success":
+            sys_logger.add_log("❌ Sell failed")
+            return
+
+        # Calculate PnL in SOL terms
+        pnl_sol = current_sol - entry
+        
+        solana_tracker.save_trade(
+            "SELL",
+            token,
+            "SOL",
+            amount,
+            current_sol,
+            status=reason,
+            token_address=address
+        )
+
+        self.trader_strategy.on_sell(pos)
+        self.remove_position(token)
+        
+        # Record PnL to risk manager (for cooldown tracking)
+        self.risk_manager.record_trade_pnl(pnl_sol)
+
+        self.recently_sold.append(token)
+        self.recently_sold = self.recently_sold[-50:]
+
+        sys_logger.add_log(f"✅ SOLD {token} | PnL: {pnl_sol:.4f} SOL")
+
+
+# =============================
+# SINGLETON
+# =============================
 solana_auto = SolanaAutoBot()

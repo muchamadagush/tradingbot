@@ -214,5 +214,24 @@ async def batch_backtest(symbols, timeframe='1h', days_back=30, enable_risk_mana
         await asyncio.sleep(1)
     return results
 
+
+# Wrapper function for API
+async def run_backtest(symbol: str, strategy: str = "RSI_MACD", 
+                       start_date: str = None, end_date: str = None,
+                       initial_capital: float = 1000, timeframe: str = "1m"):
+    """Run backtest - wrapper for API endpoint."""
+    engine = BacktestEngine(initial_capital=initial_capital)
+    # Calculate days_back from dates if provided
+    days_back = 30
+    if start_date and end_date:
+        try:
+            start = datetime.fromisoformat(start_date)
+            end = datetime.fromisoformat(end_date)
+            days_back = (end - start).days
+        except:
+            pass
+    return await engine.run_backtest(symbol, timeframe, days_back)
+
+
 if __name__ == "__main__":
     asyncio.run(BacktestEngine().run_backtest('BTC/USDT'))
