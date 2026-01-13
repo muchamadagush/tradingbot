@@ -10,6 +10,9 @@ from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# Load environment early so DATABASE_URL is available for database imports
+load_dotenv()
+
 import database
 import strategy
 import solana_tracker
@@ -30,7 +33,6 @@ from global_kill_switch import kill_switch
 # ENV & APP INIT
 # ==========================================
 
-load_dotenv()
 app = FastAPI()
 
 app.add_middleware(
@@ -902,7 +904,7 @@ async def system_logs():
 # TOKOCRYPTO PRICE
 # ==========================================
 
-@app.get("/api/toko/price/{symbol}")
+@app.get("/api/toko/price/{symbol:path}")
 async def toko_price(symbol: str):
     """Get current price from Tokocrypto."""
     try:
