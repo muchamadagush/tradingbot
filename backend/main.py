@@ -359,16 +359,16 @@ async def auto_trading_loop():
         # MANAGE OPEN POSITION (WITH TRAILING STOP)
         # ======================
         if active:
-            symbol = active["symbol"]
-            trade_id = active["id"]
+            symbol = active.symbol
+            trade_id = active.id
             CURRENT_SCAN_TARGET = f"Managing {symbol}"
 
             try:
                 ticker = await exchange.fetch_ticker(symbol)
                 price = ticker["last"]
 
-                buy_price = active["buy_price"]
-                amount = active["amount"]
+                buy_price = active.buy_price
+                amount = active.amount
 
                 pnl_pct = (price - buy_price) / buy_price
                 
@@ -421,7 +421,7 @@ async def auto_trading_loop():
                             sys_logger.add_log(f"⚠️ Sell failed: {result.get('error')}")
                             continue
 
-                    save_sell_trade(active["id"], price, profit, reason=exit_reason)
+                    save_sell_trade(active.id, price, profit, reason=exit_reason)
                     hunter_risk.record_trade_pnl(profit)
                     
                     # Cleanup trailing stop state
