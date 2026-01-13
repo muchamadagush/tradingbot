@@ -24,6 +24,7 @@ import paper_trading
 import fee_calculator
 import execution  # P3: Execution utilities with retry and order book check
 
+from database_pg import get_db_session, Trade, TradeState
 from risk_manager import RiskManager, RiskLimits, BotRiskRegistry, BotType
 from jupiter_handler import jupiter_bot
 from solana_auto import solana_auto
@@ -155,12 +156,14 @@ class SwapRequest(BaseModel):
 
 def get_any_active_trade():
     """Get any trade in OPEN or CLOSING state."""
-    conn = database.get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM trades WHERE status IN ('OPEN', 'CLOSING') LIMIT 1")
-    row = cur.fetchone()
-    conn.close()
-    return row
+    session = get_db_session()
+    try:
+        trade = session.query(Trade).filter(
+            Trade.status.in_([TradeState.OPEN, TradeState.CLOSING])
+        ).first()
+        return trade
+    finally:
+        session.close()
 
 def save_buy_trade(symbol, price, amount, usdt, bot_type="HUNTER"):
     """
