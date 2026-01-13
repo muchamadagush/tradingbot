@@ -8,8 +8,10 @@ import json
 import os
 from datetime import datetime, timedelta
 import pandas as pd
-import database
 from typing import Dict, List, Tuple, Optional
+
+# Import directly from PostgreSQL database layer
+from database_pg import get_db_session, Trade, TradeState
 
 # =========================================
 # SOLANA ANALYTICS
@@ -303,30 +305,37 @@ def calculate_tokocrypto_analytics(
             }
         }
     """
-    conn = database.get_connection()
-    cursor = conn.cursor()
-    
-    # Get closed trades (status='CLOSED') which have profit_usdt
-    query = """
-        SELECT id, symbol, buy_price, sell_price, amount, profit_usdt, 
-               created_at, closed_at
-        FROM trades
-        WHERE status = 'CLOSED' AND profit_usdt IS NOT NULL
-    """
-    
-    if start_date or end_date:
-        filters = []
+    session = get_db_session()
+    try:
+        # Get closed trades from PostgreSQL
+        query = session.query(Trade).filter(Trade.status == TradeState.CLOSED)
+        
         if start_date:
-            filters.append(f"closed_at >= '{start_date}'")
+            start_dt = pd.to_datetime(start_date)
+            query = query.filter(Trade.closed_at >= start_dt)
+        
         if end_date:
-            filters.append(f"closed_at <= '{end_date}'")
-        query += " AND " + " AND ".join(filters)
-    
-    query += " ORDER BY closed_at ASC"
-    
-    cursor.execute(query)
-    rows = cursor.fetchall()
-    conn.close()
+            end_dt = pd.to_datetime(end_date)
+            query = query.filter(Trade.closed_at <= end_dt)
+        
+        trades_obj = query.order_by(Trade.closed_at.asc()).all()
+        
+        # Convert to dict format for compatibility
+        rows = [
+            {
+                'id': t.id,
+                'symbol': t.symbol,
+                'buy_price': t.buy_price,
+                'sell_price': t.sell_price,
+                'amount': t.amount,
+                'profit_usdt': t.profit_usdt,
+                'created_at': t.created_at,
+                'closed_at': t.closed_at,
+            }
+            for t in trades_obj
+        ]
+    finally:
+        session.close()
     
     if not rows:
         return {

@@ -13,7 +13,6 @@ from pydantic import BaseModel
 # Load environment early so DATABASE_URL is available for database imports
 load_dotenv()
 
-import database
 import strategy
 import solana_tracker
 import sys_logger
@@ -24,7 +23,11 @@ import paper_trading
 import fee_calculator
 import execution  # P3: Execution utilities with retry and order book check
 
-from database_pg import get_db_session, Trade, TradeState
+# Import directly from PostgreSQL database layer (NOT SQLite wrapper)
+from database_pg import (
+    get_db_session, Trade, TradeState, TradeLedger,
+    session_scope, get_account_balance, update_account_balance
+)
 from risk_manager import RiskManager, RiskLimits, BotRiskRegistry, BotType
 from jupiter_handler import jupiter_bot
 from solana_auto import solana_auto
@@ -170,18 +173,49 @@ def save_buy_trade(symbol, price, amount, usdt, bot_type="HUNTER"):
     Create and immediately open a trade using atomic lifecycle.
     Returns trade_id.
     """
-    # Create in PENDING state
-    trade_id = database.create_trade(
-        symbol=symbol,
-        buy_price=price,
-        amount=amount,
-        total_usdt=usdt,
-        bot_type=bot_type,
-        mode=BOT_MODE
-    )
-    
-    # Immediately transition to OPEN (order confirmed)
-    database.open_trade(trade_id, reason="ORDER_FILLED")
+    with session_scope() as session:
+        # Create trade in PENDING state
+        trade = Trade(
+            symbol=symbol,
+            side='BUY',
+            buy_price=price,
+            amount=amount,
+            total_usdt=usdt,
+            status=TradeState.PENDING,
+            mode=BOT_MODE,
+            bot_type=bot_type
+        )
+        session.add(trade)
+        session.flush()
+        trade_id = trade.id
+        
+        # Log creation
+        ledger = TradeLedger(
+            trade_id=trade_id,
+            event_type='CREATED',
+            new_state=TradeState.PENDING,
+            price=price,
+            amount=amount,
+            value_usdt=usdt,
+            bot_type=bot_type,
+            reason='NEW_ORDER'
+        )
+        session.add(ledger)
+        
+        # Immediately transition to OPEN
+        trade.status = TradeState.OPEN
+        from datetime import datetime
+        trade.opened_at = datetime.utcnow()
+        
+        ledger_open = TradeLedger(
+            trade_id=trade_id,
+            event_type='OPENED',
+            old_state=TradeState.PENDING,
+            new_state=TradeState.OPEN,
+            price=price,
+            reason='ORDER_FILLED'
+        )
+        session.add(ledger_open)
     
     return trade_id
 
@@ -189,16 +223,45 @@ def save_sell_trade(trade_id, sell_price, profit, reason="TP_HIT"):
     """
     Close a trade using atomic lifecycle with ledger logging.
     """
-    # Start closing
-    database.start_closing_trade(trade_id, reason=reason)
+    with session_scope() as session:
+        trade = session.query(Trade).filter_by(id=trade_id).first()
+        if not trade:
+            return False
+        
+        from datetime import datetime
+        
+        # Start closing
+        trade.status = TradeState.CLOSING
+        trade.closing_at = datetime.utcnow()
+        trade.sell_price = sell_price
+        trade.profit_usdt = profit
+        
+        ledger_closing = TradeLedger(
+            trade_id=trade_id,
+            event_type='CLOSING',
+            old_state=TradeState.OPEN,
+            new_state=TradeState.CLOSING,
+            price=sell_price,
+            reason=reason
+        )
+        session.add(ledger_closing)
+        
+        # Complete the close
+        trade.status = TradeState.CLOSED
+        trade.closed_at = datetime.utcnow()
+        
+        ledger_closed = TradeLedger(
+            trade_id=trade_id,
+            event_type='CLOSED',
+            old_state=TradeState.CLOSING,
+            new_state=TradeState.CLOSED,
+            price=sell_price,
+            pnl=profit,
+            reason=reason
+        )
+        session.add(ledger_closed)
     
-    # Complete the close
-    database.close_trade(
-        trade_id=trade_id,
-        sell_price=sell_price,
-        profit=profit,
-        reason=reason
-    )
+    return True
 
 # ==========================================
 # MARKET SCANNER
@@ -447,7 +510,29 @@ def bot_status():
 
 @app.get("/api/trade/history")
 def trade_history():
-    return database.get_trade_history(limit=50)
+    session = get_db_session()
+    try:
+        trades = session.query(Trade).order_by(Trade.id.desc()).limit(50).all()
+        return [
+            {
+                'id': t.id,
+                'symbol': t.symbol,
+                'side': t.side,
+                'buy_price': t.buy_price,
+                'sell_price': t.sell_price,
+                'amount': t.amount,
+                'total_usdt': t.total_usdt,
+                'status': t.status,
+                'profit_usdt': t.profit_usdt,
+                'entry_time': t.created_at.isoformat() if t.created_at else None,
+                'exit_time': t.closed_at.isoformat() if t.closed_at else None,
+                'bot_type': t.bot_type,
+                'mode': t.mode,
+            }
+            for t in trades
+        ]
+    finally:
+        session.close()
 
 @app.get("/api/trade/ledger")
 def trade_ledger(trade_id: int = None, bot_type: str = None, limit: int = 100):
@@ -455,16 +540,55 @@ def trade_ledger(trade_id: int = None, bot_type: str = None, limit: int = 100):
     Get immutable trade ledger entries.
     Filter by trade_id or bot_type.
     """
-    return database.get_trade_history_from_ledger(
-        trade_id=trade_id,
-        bot_type=bot_type,
-        limit=limit
-    )
+    session = get_db_session()
+    try:
+        query = session.query(TradeLedger)
+        if trade_id:
+            query = query.filter(TradeLedger.trade_id == trade_id)
+        if bot_type:
+            query = query.filter(TradeLedger.bot_type == bot_type)
+        entries = query.order_by(TradeLedger.timestamp.desc()).limit(limit).all()
+        return [
+            {
+                'id': e.id,
+                'trade_id': e.trade_id,
+                'event_type': e.event_type,
+                'old_state': e.old_state,
+                'new_state': e.new_state,
+                'price': e.price,
+                'amount': e.amount,
+                'pnl': e.pnl,
+                'reason': e.reason,
+                'timestamp': e.timestamp.isoformat() if e.timestamp else None,
+            }
+            for e in entries
+        ]
+    finally:
+        session.close()
 
 @app.get("/api/trade/ledger/{trade_id}")
 def trade_ledger_by_id(trade_id: int):
     """Get all ledger entries for a specific trade."""
-    return database.get_trade_history_from_ledger(trade_id=trade_id)
+    session = get_db_session()
+    try:
+        entries = session.query(TradeLedger).filter(TradeLedger.trade_id == trade_id).order_by(TradeLedger.timestamp).all()
+        return [
+            {
+                'id': e.id,
+                'trade_id': e.trade_id,
+                'event_type': e.event_type,
+                'old_state': e.old_state,
+                'new_state': e.new_state,
+                'price': e.price,
+                'amount': e.amount,
+                'pnl': e.pnl,
+                'reason': e.reason,
+                'timestamp': e.timestamp.isoformat() if e.timestamp else None,
+            }
+            for e in entries
+        ]
+    finally:
+        session.close()
 
 # ==========================================
 # SOLANA ENDPOINTS
@@ -750,7 +874,13 @@ async def risk_summary():
 async def risk_kelly():
     """Calculate Kelly criterion position size."""
     # Get historical win rate from trades
-    trades = database.get_trades(limit=100)
+    session = get_db_session()
+    try:
+        trades_obj = session.query(Trade).filter(Trade.status == TradeState.CLOSED).order_by(Trade.id.desc()).limit(100).all()
+        trades = [{'profit_usdt': t.profit_usdt} for t in trades_obj]
+    finally:
+        session.close()
+    
     if not trades:
         return {"kelly_pct": 0, "message": "No trade history"}
     
@@ -803,8 +933,25 @@ async def backtest_run(req: BacktestRequest):
             initial_capital=req.initial_capital,
             timeframe=req.timeframe,
         )
-        # Save result
-        database.save_backtest_result(result)
+        # Save result to PostgreSQL
+        from database_pg import BacktestResult
+        import json
+        with session_scope() as session:
+            backtest = BacktestResult(
+                symbol=result['symbol'],
+                timeframe=result['timeframe'],
+                period_days=result.get('period_days', 30),
+                initial_capital=result['initial_capital'],
+                final_capital=result['final_capital'],
+                roi_pct=result['roi_pct'],
+                total_trades=result['total_trades'],
+                win_rate_pct=result['win_rate_pct'],
+                max_drawdown_pct=result['max_drawdown_pct'],
+                profit_factor=result['profit_factor'],
+                total_fees_paid=result.get('total_fees_paid', 0),
+                result_json=json.dumps(result, default=str)
+            )
+            session.add(backtest)
         return result
     except Exception as e:
         return {"error": str(e)}
@@ -836,7 +983,28 @@ async def backtest_batch(req: BatchBacktestRequest):
 @app.get("/api/backtest/history")
 async def backtest_history():
     """Get backtest history."""
-    return {"history": database.get_backtest_history()}
+    from database_pg import BacktestResult
+    session = get_db_session()
+    try:
+        results = session.query(BacktestResult).order_by(BacktestResult.created_at.desc()).limit(10).all()
+        return {
+            "history": [
+                {
+                    'id': r.id,
+                    'symbol': r.symbol,
+                    'timeframe': r.timeframe,
+                    'roi_pct': r.roi_pct,
+                    'total_trades': r.total_trades,
+                    'win_rate_pct': r.win_rate_pct,
+                    'max_drawdown_pct': r.max_drawdown_pct,
+                    'profit_factor': r.profit_factor,
+                    'created_at': r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in results
+            ]
+        }
+    finally:
+        session.close()
 
 
 # ==========================================
