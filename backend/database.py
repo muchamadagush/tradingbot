@@ -401,6 +401,35 @@ def get_trade_ledger(trade_id: int) -> List[Dict]:
         session.close()
 
 
+def get_trade_history(limit: int = 50) -> List[Dict]:
+    """
+    Get recent trades from database.
+    Used by /api/trade/history endpoint.
+    """
+    session = get_db_session()
+    try:
+        trades = session.query(Trade).order_by(Trade.id.desc()).limit(limit).all()
+        return [
+            {
+                'id': t.id,
+                'symbol': t.symbol,
+                'side': t.side,
+                'buy_price': t.buy_price,
+                'sell_price': t.sell_price,
+                'amount': t.amount,
+                'total_usdt': t.total_usdt,
+                'status': t.status,
+                'entry_time': t.created_at.isoformat() if t.created_at else None,
+                'exit_time': t.updated_at.isoformat() if t.updated_at else None,
+                'bot_type': t.bot_type,
+                'mode': t.mode,
+            }
+            for t in trades
+        ]
+    finally:
+        session.close()
+
+
 if __name__ == "__main__":
     # Test the adapter
     print("✅ Database adapter initialized")

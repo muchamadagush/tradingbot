@@ -442,12 +442,7 @@ def bot_status():
 
 @app.get("/api/trade/history")
 def trade_history():
-    conn = database.get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 50")
-    rows = cur.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    return database.get_trade_history(limit=50)
 
 @app.get("/api/trade/ledger")
 def trade_ledger(trade_id: int = None, bot_type: str = None, limit: int = 100):
