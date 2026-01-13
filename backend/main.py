@@ -553,10 +553,12 @@ def trade_history():
                 'total_usdt': t.total_usdt,
                 'status': t.status,
                 'profit_usdt': t.profit_usdt,
+                'created_at': t.created_at.isoformat() if t.created_at else None,
                 'entry_time': t.created_at.isoformat() if t.created_at else None,
                 'exit_time': t.closed_at.isoformat() if t.closed_at else None,
                 'bot_type': t.bot_type,
                 'mode': t.mode,
+                'source': 'Hunter',  # Add source field for frontend
             }
             for t in trades
         ]
