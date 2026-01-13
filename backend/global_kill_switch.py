@@ -1,5 +1,6 @@
 from datetime import date, timedelta
-from database import get_connection
+from sqlalchemy import func
+from database_pg import get_db_session, TradeLedger, Account, SystemFlag, OpenPosition
 import sys_logger
 
 
@@ -19,7 +20,6 @@ class GlobalKillSwitch:
     MAX_UNREALIZED_LOSS_PCT = 0.03  # 3%
 
     def __init__(self):
-        self.conn = get_connection()
         self._last_check_reason = None
 
     # ================= PUBLIC =================
@@ -75,14 +75,18 @@ class GlobalKillSwitch:
     def set_manual_kill(self, enabled: bool) -> bool:
         """Enable or disable manual kill switch."""
         try:
-            cur = self.conn.cursor()
-            cur.execute("""
-                INSERT OR REPLACE INTO system_flags (key, value)
-                VALUES ('TRADING_DISABLED', ?)
-            """, ("true" if enabled else "false",))
-            self.conn.commit()
-            sys_logger.add_log(f"⚠️ MANUAL KILL SWITCH: {'ENABLED' if enabled else 'DISABLED'}")
-            return True
+            session = get_db_session()
+            try:
+                flag = session.query(SystemFlag).filter_by(key='TRADING_DISABLED').first()
+                if flag:
+                    flag.value = "true" if enabled else "false"
+                else:
+                    session.add(SystemFlag(key='TRADING_DISABLED', value="true" if enabled else "false"))
+                session.commit()
+                sys_logger.add_log(f"⚠️ MANUAL KILL SWITCH: {'ENABLED' if enabled else 'DISABLED'}")
+                return True
+            finally:
+                session.close()
         except Exception as e:
             sys_logger.add_log(f"❌ Failed to set manual kill: {e}")
             return False
@@ -90,12 +94,12 @@ class GlobalKillSwitch:
     # ================= CHECKS =================
 
     def _manual_kill(self) -> bool:
-        cur = self.conn.cursor()
-        cur.execute(
-            "SELECT value FROM system_flags WHERE key='TRADING_DISABLED'"
-        )
-        row = cur.fetchone()
-        return bool(row and row[0] == "true")
+        session = get_db_session()
+        try:
+            flag = session.query(SystemFlag).filter_by(key='TRADING_DISABLED').first()
+            return bool(flag and flag.value == "true")
+        finally:
+            session.close()
 
     def _daily_loss_exceeded(self) -> bool:
         daily_pnl = self._get_daily_pnl()
@@ -133,16 +137,16 @@ class GlobalKillSwitch:
     def _get_daily_pnl(self) -> float:
         """Get sum of realized PnL for today from trade_ledger (immutable source)."""
         today = date.today().isoformat()
-        cur = self.conn.cursor()
-        
-        # Use trade_ledger for accurate, immutable PnL data
-        cur.execute("""
-            SELECT COALESCE(SUM(pnl), 0)
-            FROM trade_ledger
-            WHERE DATE(timestamp) = ? AND event_type = 'CLOSED'
-        """, (today,))
-        
-        return float(cur.fetchone()[0])
+        session = get_db_session()
+        try:
+            # Use trade_ledger for accurate, immutable PnL data
+            result = session.query(func.coalesce(func.sum(TradeLedger.pnl), 0)).filter(
+                func.date(TradeLedger.timestamp) == today,
+                TradeLedger.event_type == 'CLOSED'
+            ).scalar()
+            return float(result)
+        finally:
+            session.close()
 
     def _get_weekly_pnl(self) -> float:
         """Get sum of realized PnL for current week from trade_ledger."""
@@ -150,14 +154,15 @@ class GlobalKillSwitch:
         # Get Monday of current week
         week_start = (today - timedelta(days=today.weekday())).isoformat()
         
-        cur = self.conn.cursor()
-        cur.execute("""
-            SELECT COALESCE(SUM(pnl), 0)
-            FROM trade_ledger
-            WHERE DATE(timestamp) >= ? AND event_type = 'CLOSED'
-        """, (week_start,))
-        
-        return float(cur.fetchone()[0])
+        session = get_db_session()
+        try:
+            result = session.query(func.coalesce(func.sum(TradeLedger.pnl), 0)).filter(
+                func.date(TradeLedger.timestamp) >= week_start,
+                TradeLedger.event_type == 'CLOSED'
+            ).scalar()
+            return float(result)
+        finally:
+            session.close()
 
     def _get_unrealized_pnl(self) -> float:
         """
@@ -166,29 +171,29 @@ class GlobalKillSwitch:
         NOTE: This requires current prices. For now, we estimate based on
         stored position data. In production, this should fetch live prices.
         """
-        cur = self.conn.cursor()
-        
-        # Check if open_positions table has data
-        cur.execute("""
-            SELECT symbol, amount, entry_price 
-            FROM open_positions
-        """)
-        positions = cur.fetchall()
-        
-        if not positions:
+        session = get_db_session()
+        try:
+            # Check if open_positions table has data
+            positions = session.query(OpenPosition).all()
+            
+            if not positions:
+                return 0.0
+            
+            # For paper trading, we can estimate unrealized as 0 until we have price feeds
+            # TODO: Integrate with live price feeds for accurate unrealized PnL
+            # For now, return 0 (conservative - won't trigger false positives)
             return 0.0
-        
-        # For paper trading, we can estimate unrealized as 0 until we have price feeds
-        # TODO: Integrate with live price feeds for accurate unrealized PnL
-        # For now, return 0 (conservative - won't trigger false positives)
-        return 0.0
+        finally:
+            session.close()
 
     def _get_equity(self) -> float:
         """Get current account equity/balance."""
-        cur = self.conn.cursor()
-        cur.execute("SELECT balance FROM account LIMIT 1")
-        row = cur.fetchone()
-        return float(row[0]) if row else 1000.0  # Default to 1000 if no account
+        session = get_db_session()
+        try:
+            account = session.query(Account).filter_by(id=1).first()
+            return float(account.balance) if account else 1000.0  # Default to 1000 if no account
+        finally:
+            session.close()
 
 
 # ================= SINGLETON =================
