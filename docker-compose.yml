@@ -1,10 +1,43 @@
 services:
+  # ===== PostgreSQL Database =====
+  postgres:
+    image: postgres:15-alpine
+    container_name: crypto-bot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: crypto_bot
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: secure_trading_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-EXEC", "pg_isready -U trader"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - crypto-bot-network
+
+  # ===== FastAPI Backend =====
   backend:
     build: ./backend
     container_name: solana-backend-dev
     restart: always
     ports:
-      - "8000:8000"  # Sesuai request (Backend Port 8000)
+      - "8000:8000"
+    environment:
+      # PostgreSQL connection
+      DATABASE_URL: "postgresql://trader:secure_trading_password@postgres:5432/crypto_bot"
+      
+      # Bot configuration
+      BOT_MODE: PAPER
+      MAX_POSITION_SIZE_PCT: 10
+      MAX_PORTFOLIO_DRAWDOWN_PCT: 20
+      MAX_DAILY_LOSS_PCT: 5
+      MAX_OPEN_POSITIONS: 3
+      RISK_PER_TRADE_PCT: 2
     env_file:
       - ./backend/.env
     volumes:
@@ -12,15 +45,31 @@ services:
       - ./backend/solana_positions.json:/app/solana_positions.json
       - ./backend/paper_trading_state.json:/app/paper_trading_state.json
       - ./backend/logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - crypto-bot-network
 
+  # ===== React Frontend =====
   frontend:
     build: ./frontend
     container_name: solana-frontend-dev
     restart: always
     ports:
-      - "3001:80"   # Host 3001 -> Container 80 (Agar tidak bentrok dengan Nginx Host)
+      - "3001:80"
     environment:
-      # PENTING: Variabel ini akan dibakar saat build
-      - VITE_API_URL=https://dev-tradingbot.iamagus.com
+      # API endpoint
+      VITE_API_URL: https://dev-tradingbot.iamagus.com
     depends_on:
       - backend
+    networks:
+      - crypto-bot-network
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  crypto-bot-network:
+    driver: bridge

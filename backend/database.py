@@ -1,598 +1,406 @@
-import sqlite3
+"""
+Database adapter for PostgreSQL migration.
+
+This module provides backward-compatible functions from the old SQLite database.py
+while using PostgreSQL under the hood via database_pg.py.
+
+Allows gradual migration without rewriting all of main.py at once.
+"""
+
 from datetime import datetime
-from contextlib import contextmanager
-from typing import Optional, Dict, List
-from enum import Enum
+from typing import Optional, List, Dict, Any
 import json
+from enum import Enum
 
+# Import from new PostgreSQL layer
+from database_pg import (
+    get_db_session, session_scope, Trade, TradeLedger, Account, 
+    OpenPosition, SystemFlag, BacktestResult, TradeState, BotType,
+    get_account_balance as pg_get_account_balance,
+    update_account_balance as pg_update_account_balance,
+    get_system_flag as pg_get_system_flag,
+    set_system_flag as pg_set_system_flag
+)
 
-DB_NAME = "crypto_bot.db"
+# ===== BACKWARD COMPATIBILITY WRAPPER =====
 
-
-# =========================
-# TRADE STATE MACHINE (P1)
-# =========================
-class TradeState(str, Enum):
-    PENDING = "PENDING"     # Order submitted, not yet confirmed
-    OPEN = "OPEN"           # Position is active
-    CLOSING = "CLOSING"     # Sell order submitted
-    CLOSED = "CLOSED"       # Position fully closed
-    CANCELLED = "CANCELLED" # Order cancelled
-    FAILED = "FAILED"       # Order failed
-
-
-class BotType(str, Enum):
-    HUNTER = "HUNTER"
-    TRADER = "TRADER"
-    SNIPER = "SNIPER"
-
-
-# =========================
-# CONNECTION
-# =========================
 def get_connection():
-    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """
+    DEPRECATED: Use get_db_session() instead.
+    This wrapper returns a session-like object for backward compatibility.
+    """
+    return get_db_session()
 
 
-@contextmanager
 def transaction():
     """
-    Context manager for atomic database transactions.
-    Usage:
-        with transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute(...)
-            # Auto-commit on success, rollback on exception
+    DEPRECATED: Use session_scope() instead.
+    Wrapper for backward compatibility.
     """
-    conn = get_connection()
-    try:
-        yield conn
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        raise e
-    finally:
-        conn.close()
+    return session_scope()
 
 
-# =========================
-# INIT DATABASE
-# =========================
 def init_db():
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    # -------------------------------------------------
-    # 1. TABEL TRADES (UPDATED WITH STATE MACHINE)
-    # -------------------------------------------------
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            side TEXT NOT NULL,          -- 'BUY'
-            buy_price REAL NOT NULL,
-            amount REAL NOT NULL,
-            total_usdt REAL NOT NULL,
-
-            status TEXT DEFAULT 'PENDING',  -- PENDING/OPEN/CLOSING/CLOSED/CANCELLED/FAILED
-            sell_price REAL,
-            profit_usdt REAL,
-
-            fee_paid REAL DEFAULT 0,
-            mode TEXT DEFAULT 'LIVE',    -- LIVE / PAPER / BACKTEST
-            bot_type TEXT DEFAULT 'HUNTER',  -- HUNTER / TRADER / SNIPER
-
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            opened_at DATETIME,          -- When PENDING -> OPEN
-            closing_at DATETIME,         -- When OPEN -> CLOSING
-            closed_at DATETIME           -- When CLOSING -> CLOSED
-        )
-    """)
-
-    # -------------------------------------------------
-    # 1b. TRADE LEDGER (IMMUTABLE AUDIT LOG) - NEW P1
-    # -------------------------------------------------
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS trade_ledger (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trade_id INTEGER NOT NULL,
-            event_type TEXT NOT NULL,    -- CREATED/OPENED/CLOSING/CLOSED/CANCELLED/FAILED
-            old_state TEXT,
-            new_state TEXT NOT NULL,
-            
-            -- Snapshot data at this moment
-            price REAL,
-            amount REAL,
-            value_usdt REAL,
-            fee REAL DEFAULT 0,
-            pnl REAL,
-            
-            -- Metadata
-            bot_type TEXT,
-            reason TEXT,                 -- Why state changed (TP_HIT, SL_HIT, MANUAL, ERROR)
-            
-            -- Immutable timestamp
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            
-            FOREIGN KEY (trade_id) REFERENCES trades(id)
-        )
-    """)
-    
-    # Create index for fast lookups
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_ledger_trade_id ON trade_ledger(trade_id)
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_ledger_timestamp ON trade_ledger(timestamp)
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_ledger_bot_type ON trade_ledger(bot_type)
-    """)
-
-    # -------------------------------------------------
-    # 2. BACKTEST RESULTS (EXISTING)
-    # -------------------------------------------------
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS backtest_results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            timeframe TEXT NOT NULL,
-            period_days INTEGER NOT NULL,
-            initial_capital REAL NOT NULL,
-            final_capital REAL NOT NULL,
-            roi_pct REAL NOT NULL,
-            total_trades INTEGER NOT NULL,
-            win_rate_pct REAL NOT NULL,
-            max_drawdown_pct REAL NOT NULL,
-            profit_factor REAL NOT NULL,
-            total_fees_paid REAL NOT NULL,
-            result_json TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # -------------------------------------------------
-    # 3. PAPER TRADING SNAPSHOTS (EXISTING)
-    # -------------------------------------------------
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS paper_trading_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            balance REAL NOT NULL,
-            total_equity REAL NOT NULL,
-            total_pnl REAL NOT NULL,
-            open_positions INTEGER NOT NULL,
-            snapshot_json TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # =================================================
-    # 🔴 P0.1 ADDITIONS (WAJIB UNTUK GLOBAL KILL SWITCH)
-    # =================================================
-
-    # -------------------------------------------------
-    # 4. SYSTEM FLAGS (MANUAL KILL SWITCH)
-    # -------------------------------------------------
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS system_flags (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-
-    cursor.execute("""
-        INSERT OR IGNORE INTO system_flags (key, value)
-        VALUES ('TRADING_DISABLED', 'false')
-    """)
-
-    # -------------------------------------------------
-    # 5. ACCOUNT (EQUITY SOURCE)
-    # -------------------------------------------------
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS account (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            balance REAL NOT NULL,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    cursor.execute("""
-        INSERT OR IGNORE INTO account (id, balance)
-        VALUES (1, 0)
-    """)
-
-    # -------------------------------------------------
-    # 6. OPEN POSITIONS (UNREALIZED PnL)
-    # -------------------------------------------------
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS open_positions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            amount REAL NOT NULL,
-            entry_price REAL NOT NULL,
-            current_price REAL NOT NULL,
-            unrealized_pnl REAL NOT NULL,
-            bot_type TEXT,              -- HUNTER / TRADER / SNIPPER
-            opened_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-    print("✅ Database initialized (SAFE + KILL SWITCH READY)")
+    """
+    DEPRECATED: Use init_pg_db() instead.
+    """
+    from database_pg import init_pg_db
+    init_pg_db()
 
 
-# =========================
-# BACKTEST HELPERS
-# =========================
-def save_backtest_result(result: dict):
-    conn = get_connection()
-    cursor = conn.cursor()
-    import json
+# ===== TRADE OPERATIONS =====
 
-    cursor.execute("""
-        INSERT INTO backtest_results (
-            symbol, timeframe, period_days,
-            initial_capital, final_capital, roi_pct,
-            total_trades, win_rate_pct, max_drawdown_pct,
-            profit_factor, total_fees_paid, result_json
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        result["symbol"],
-        result["timeframe"],
-        result["period_days"],
-        result["initial_capital"],
-        result["final_capital"],
-        result["roi_pct"],
-        result["total_trades"],
-        result["win_rate_pct"],
-        result["max_drawdown_pct"],
-        result["profit_factor"],
-        result["total_fees_paid"],
-        json.dumps(result, default=str)
-    ))
-
-    conn.commit()
-    backtest_id = cursor.lastrowid
-    conn.close()
-    return backtest_id
-
-
-def get_backtest_history(limit=10):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT *
-        FROM backtest_results
-        ORDER BY created_at DESC
-        LIMIT ?
-    """, (limit,))
-
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
-
-
-# =========================
-# ACCOUNT / EQUITY HELPERS
-# =========================
-def update_account_balance(balance: float):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        UPDATE account
-        SET balance = ?, updated_at = ?
-        WHERE id = 1
-    """, (balance, datetime.utcnow()))
-
-    conn.commit()
-    conn.close()
-
-
-def get_account_balance() -> float:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT balance FROM account WHERE id = 1")
-    row = cursor.fetchone()
-    conn.close()
-    return float(row["balance"]) if row else 0.0
-
-
-# =========================
-# SYSTEM FLAG HELPERS
-# =========================
-def set_trading_disabled(value: bool):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        UPDATE system_flags
-        SET value = ?
-        WHERE key = 'TRADING_DISABLED'
-    """, ("true" if value else "false",))
-
-    conn.commit()
-    conn.close()
-
-
-def is_trading_disabled() -> bool:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT value FROM system_flags
-        WHERE key = 'TRADING_DISABLED'
-    """)
-    row = cursor.fetchone()
-    conn.close()
-    return bool(row and row["value"] == "true")
-
-
-# =========================================================
-# ATOMIC TRADE LIFECYCLE (P1)
-# =========================================================
-
-def create_trade(
+def save_trade(
     symbol: str,
+    side: str,
     buy_price: float,
     amount: float,
     total_usdt: float,
-    bot_type: str = "HUNTER",
     mode: str = "PAPER",
-    fee: float = 0.0
+    bot_type: str = "HUNTER"
 ) -> int:
-    """
-    Create a new trade in PENDING state.
-    Returns trade_id.
-    """
-    with transaction() as conn:
-        cursor = conn.cursor()
-        now = datetime.utcnow()
-        
-        # Insert trade in PENDING state
-        cursor.execute("""
-            INSERT INTO trades (
-                symbol, side, buy_price, amount, total_usdt,
-                status, fee_paid, mode, bot_type, created_at
-            ) VALUES (?, 'BUY', ?, ?, ?, 'PENDING', ?, ?, ?, ?)
-        """, (symbol, buy_price, amount, total_usdt, fee, mode, bot_type, now))
-        
-        trade_id = cursor.lastrowid
-        
-        # Log to immutable ledger
-        cursor.execute("""
-            INSERT INTO trade_ledger (
-                trade_id, event_type, old_state, new_state,
-                price, amount, value_usdt, fee, bot_type, reason, timestamp
-            ) VALUES (?, 'CREATED', NULL, 'PENDING', ?, ?, ?, ?, ?, 'NEW_ORDER', ?)
-        """, (trade_id, buy_price, amount, total_usdt, fee, bot_type, now))
-        
-        return trade_id
+    """Save new trade to database."""
+    with session_scope() as session:
+        trade = Trade(
+            symbol=symbol,
+            side=side,
+            buy_price=buy_price,
+            amount=amount,
+            total_usdt=total_usdt,
+            status=TradeState.PENDING,
+            mode=mode,
+            bot_type=bot_type,
+            created_at=datetime.utcnow()
+        )
+        session.add(trade)
+        session.flush()
+        trade_id = trade.id
+    return trade_id
 
 
-def open_trade(trade_id: int, reason: str = "ORDER_FILLED") -> bool:
-    """
-    Transition trade from PENDING -> OPEN.
-    Called when buy order is confirmed.
-    """
-    with transaction() as conn:
-        cursor = conn.cursor()
-        now = datetime.utcnow()
-        
-        # Verify current state
-        cursor.execute("SELECT status, symbol, buy_price, amount, total_usdt, bot_type FROM trades WHERE id = ?", (trade_id,))
-        trade = cursor.fetchone()
-        
-        if not trade or trade["status"] != "PENDING":
-            return False
-        
-        # Update state
-        cursor.execute("""
-            UPDATE trades SET status = 'OPEN', opened_at = ? WHERE id = ?
-        """, (now, trade_id))
-        
-        # Log to ledger
-        cursor.execute("""
-            INSERT INTO trade_ledger (
-                trade_id, event_type, old_state, new_state,
-                price, amount, value_usdt, bot_type, reason, timestamp
-            ) VALUES (?, 'OPENED', 'PENDING', 'OPEN', ?, ?, ?, ?, ?, ?)
-        """, (trade_id, trade["buy_price"], trade["amount"], trade["total_usdt"], trade["bot_type"], reason, now))
-        
-        return True
+def get_trades(limit: int = 100) -> List[Dict]:
+    """Get recent trades."""
+    session = get_db_session()
+    try:
+        trades = session.query(Trade).order_by(Trade.created_at.desc()).limit(limit).all()
+        return [
+            {
+                'id': t.id,
+                'symbol': t.symbol,
+                'side': t.side,
+                'buy_price': t.buy_price,
+                'amount': t.amount,
+                'total_usdt': t.total_usdt,
+                'status': t.status,
+                'sell_price': t.sell_price,
+                'profit_usdt': t.profit_usdt,
+                'fee_paid': t.fee_paid,
+                'mode': t.mode,
+                'bot_type': t.bot_type,
+                'created_at': t.created_at.isoformat() if t.created_at else None,
+                'opened_at': t.opened_at.isoformat() if t.opened_at else None,
+                'closing_at': t.closing_at.isoformat() if t.closing_at else None,
+                'closed_at': t.closed_at.isoformat() if t.closed_at else None,
+            }
+            for t in trades
+        ]
+    finally:
+        session.close()
 
 
-def start_closing_trade(trade_id: int, reason: str = "SELL_ORDER") -> bool:
-    """
-    Transition trade from OPEN -> CLOSING.
-    Called when sell order is submitted.
-    """
-    with transaction() as conn:
-        cursor = conn.cursor()
-        now = datetime.utcnow()
-        
-        cursor.execute("SELECT status, bot_type FROM trades WHERE id = ?", (trade_id,))
-        trade = cursor.fetchone()
-        
-        if not trade or trade["status"] != "OPEN":
-            return False
-        
-        cursor.execute("""
-            UPDATE trades SET status = 'CLOSING', closing_at = ? WHERE id = ?
-        """, (now, trade_id))
-        
-        cursor.execute("""
-            INSERT INTO trade_ledger (
-                trade_id, event_type, old_state, new_state,
-                bot_type, reason, timestamp
-            ) VALUES (?, 'CLOSING', 'OPEN', 'CLOSING', ?, ?, ?)
-        """, (trade_id, trade["bot_type"], reason, now))
-        
-        return True
+def get_open_trades(symbol: Optional[str] = None) -> List[Dict]:
+    """Get open trades, optionally filtered by symbol."""
+    session = get_db_session()
+    try:
+        query = session.query(Trade).filter(Trade.status == TradeState.OPEN)
+        if symbol:
+            query = query.filter(Trade.symbol == symbol)
+        trades = query.all()
+        return [
+            {
+                'id': t.id,
+                'symbol': t.symbol,
+                'amount': t.amount,
+                'buy_price': t.buy_price,
+                'status': t.status,
+                'opened_at': t.opened_at.isoformat() if t.opened_at else None,
+            }
+            for t in trades
+        ]
+    finally:
+        session.close()
 
 
 def close_trade(
     trade_id: int,
     sell_price: float,
-    profit: float,
-    fee: float = 0.0,
-    reason: str = "TP_HIT"
+    reason: str = "MANUAL"
 ) -> bool:
-    """
-    Transition trade from CLOSING -> CLOSED.
-    Called when sell order is confirmed.
-    """
-    with transaction() as conn:
-        cursor = conn.cursor()
-        now = datetime.utcnow()
-        
-        cursor.execute("SELECT status, buy_price, amount, fee_paid, bot_type FROM trades WHERE id = ?", (trade_id,))
-        trade = cursor.fetchone()
-        
-        if not trade or trade["status"] not in ("OPEN", "CLOSING"):
-            return False
-        
-        old_state = trade["status"]
-        total_fee = trade["fee_paid"] + fee
-        
-        cursor.execute("""
-            UPDATE trades 
-            SET status = 'CLOSED', sell_price = ?, profit_usdt = ?, 
-                fee_paid = ?, closed_at = ?
-            WHERE id = ?
-        """, (sell_price, profit, total_fee, now, trade_id))
-        
-        cursor.execute("""
-            INSERT INTO trade_ledger (
-                trade_id, event_type, old_state, new_state,
-                price, amount, value_usdt, fee, pnl, bot_type, reason, timestamp
-            ) VALUES (?, 'CLOSED', ?, 'CLOSED', ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (trade_id, old_state, sell_price, trade["amount"], 
-              sell_price * trade["amount"], fee, profit, trade["bot_type"], reason, now))
-        
-        return True
-
-
-def cancel_trade(trade_id: int, reason: str = "USER_CANCEL") -> bool:
-    """
-    Cancel a trade (only if PENDING or OPEN).
-    """
-    with transaction() as conn:
-        cursor = conn.cursor()
-        now = datetime.utcnow()
-        
-        cursor.execute("SELECT status, bot_type FROM trades WHERE id = ?", (trade_id,))
-        trade = cursor.fetchone()
-        
-        if not trade or trade["status"] not in ("PENDING", "OPEN"):
-            return False
-        
-        old_state = trade["status"]
-        
-        cursor.execute("""
-            UPDATE trades SET status = 'CANCELLED', closed_at = ? WHERE id = ?
-        """, (now, trade_id))
-        
-        cursor.execute("""
-            INSERT INTO trade_ledger (
-                trade_id, event_type, old_state, new_state,
-                bot_type, reason, timestamp
-            ) VALUES (?, 'CANCELLED', ?, 'CANCELLED', ?, ?, ?)
-        """, (trade_id, old_state, trade["bot_type"], reason, now))
-        
-        return True
-
-
-def fail_trade(trade_id: int, reason: str = "ORDER_FAILED") -> bool:
-    """
-    Mark trade as failed.
-    """
-    with transaction() as conn:
-        cursor = conn.cursor()
-        now = datetime.utcnow()
-        
-        cursor.execute("SELECT status, bot_type FROM trades WHERE id = ?", (trade_id,))
-        trade = cursor.fetchone()
-        
+    """Close a trade (update status to CLOSING then CLOSED)."""
+    with session_scope() as session:
+        trade = session.query(Trade).filter_by(id=trade_id).first()
         if not trade:
             return False
         
-        old_state = trade["status"]
+        # Update trade
+        trade.status = TradeState.CLOSING
+        trade.closing_at = datetime.utcnow()
+        trade.sell_price = sell_price
+        trade.profit_usdt = (sell_price - trade.buy_price) * trade.amount
         
-        cursor.execute("""
-            UPDATE trades SET status = 'FAILED', closed_at = ? WHERE id = ?
-        """, (now, trade_id))
+        # Log to ledger
+        ledger = TradeLedger(
+            trade_id=trade_id,
+            event_type="CLOSING",
+            old_state=TradeState.OPEN,
+            new_state=TradeState.CLOSING,
+            price=sell_price,
+            reason=reason,
+            timestamp=datetime.utcnow()
+        )
+        session.add(ledger)
+    
+    return True
+
+
+def open_trade(trade_id: int) -> bool:
+    """Mark trade as OPEN (from PENDING)."""
+    with session_scope() as session:
+        trade = session.query(Trade).filter_by(id=trade_id).first()
+        if not trade:
+            return False
         
-        cursor.execute("""
-            INSERT INTO trade_ledger (
-                trade_id, event_type, old_state, new_state,
-                bot_type, reason, timestamp
-            ) VALUES (?, 'FAILED', ?, 'FAILED', ?, ?, ?)
-        """, (trade_id, old_state, trade["bot_type"], reason, now))
+        trade.status = TradeState.OPEN
+        trade.opened_at = datetime.utcnow()
         
-        return True
+        ledger = TradeLedger(
+            trade_id=trade_id,
+            event_type="OPENED",
+            old_state=TradeState.PENDING,
+            new_state=TradeState.OPEN,
+            price=trade.buy_price,
+            reason="ORDER_CONFIRMED",
+            timestamp=datetime.utcnow()
+        )
+        session.add(ledger)
+    
+    return True
 
 
-def get_trade_history_from_ledger(
-    trade_id: Optional[int] = None,
-    bot_type: Optional[str] = None,
-    limit: int = 100
-) -> List[Dict]:
-    """
-    Get immutable trade history from ledger.
-    """
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    query = "SELECT * FROM trade_ledger WHERE 1=1"
-    params = []
-    
-    if trade_id:
-        query += " AND trade_id = ?"
-        params.append(trade_id)
-    
-    if bot_type:
-        query += " AND bot_type = ?"
-        params.append(bot_type)
-    
-    query += " ORDER BY timestamp DESC LIMIT ?"
-    params.append(limit)
-    
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
-    conn.close()
-    
-    return [dict(row) for row in rows]
+def get_trade(trade_id: int) -> Optional[Dict]:
+    """Get trade by ID."""
+    session = get_db_session()
+    try:
+        trade = session.query(Trade).filter_by(id=trade_id).first()
+        if not trade:
+            return None
+        
+        return {
+            'id': trade.id,
+            'symbol': trade.symbol,
+            'side': trade.side,
+            'buy_price': trade.buy_price,
+            'amount': trade.amount,
+            'total_usdt': trade.total_usdt,
+            'status': trade.status,
+            'sell_price': trade.sell_price,
+            'profit_usdt': trade.profit_usdt,
+            'fee_paid': trade.fee_paid,
+            'mode': trade.mode,
+            'bot_type': trade.bot_type,
+            'created_at': trade.created_at.isoformat() if trade.created_at else None,
+        }
+    finally:
+        session.close()
 
 
-def get_daily_pnl_by_bot(bot_type: str) -> float:
-    """Get today's realized PnL for a specific bot type."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    from datetime import date
-    today = date.today().isoformat()
-    
-    cursor.execute("""
-        SELECT COALESCE(SUM(pnl), 0) as total_pnl
-        FROM trade_ledger
-        WHERE bot_type = ? 
-          AND event_type = 'CLOSED'
-          AND DATE(timestamp) = ?
-    """, (bot_type, today))
-    
-    row = cursor.fetchone()
-    conn.close()
-    
-    return float(row["total_pnl"]) if row else 0.0
+# ===== ACCOUNT OPERATIONS =====
+
+def get_account_balance() -> float:
+    """Get current account balance."""
+    return pg_get_account_balance()
 
 
-# =========================
-# CLI INIT
-# =========================
+def update_account_balance(balance: float):
+    """Update account balance."""
+    pg_update_account_balance(balance)
+
+
+def get_account() -> Dict:
+    """Get full account information."""
+    with session_scope() as session:
+        account = session.query(Account).filter_by(id=1).first()
+        if not account:
+            return {'id': 1, 'balance': 0.0}
+        
+        return {
+            'id': account.id,
+            'balance': account.balance,
+            'updated_at': account.updated_at.isoformat() if account.updated_at else None,
+        }
+
+
+# ===== SYSTEM FLAGS (P0: Kill Switch) =====
+
+def get_system_flag(key: str, default: str = None) -> Optional[str]:
+    """Get system flag value."""
+    value = pg_get_system_flag(key)
+    return value if value else default
+
+
+def set_system_flag(key: str, value: str):
+    """Set system flag value."""
+    pg_set_system_flag(key, value)
+
+
+def is_trading_disabled() -> bool:
+    """Check if global kill switch is active."""
+    value = get_system_flag('TRADING_DISABLED', 'false')
+    return value.lower() == 'true'
+
+
+def set_trading_disabled(disabled: bool):
+    """Enable/disable global kill switch."""
+    set_system_flag('TRADING_DISABLED', 'true' if disabled else 'false')
+
+
+# ===== OPEN POSITIONS =====
+
+def save_open_position(
+    symbol: str,
+    amount: float,
+    entry_price: float,
+    current_price: float,
+    bot_type: str = "HUNTER"
+) -> int:
+    """Save open position."""
+    with session_scope() as session:
+        position = OpenPosition(
+            symbol=symbol,
+            amount=amount,
+            entry_price=entry_price,
+            current_price=current_price,
+            unrealized_pnl=(current_price - entry_price) * amount,
+            bot_type=bot_type
+        )
+        session.add(position)
+        session.flush()
+        position_id = position.id
+    return position_id
+
+
+def get_open_positions() -> List[Dict]:
+    """Get all open positions."""
+    session = get_db_session()
+    try:
+        positions = session.query(OpenPosition).all()
+        return [
+            {
+                'id': p.id,
+                'symbol': p.symbol,
+                'amount': p.amount,
+                'entry_price': p.entry_price,
+                'current_price': p.current_price,
+                'unrealized_pnl': p.unrealized_pnl,
+                'bot_type': p.bot_type,
+                'opened_at': p.opened_at.isoformat() if p.opened_at else None,
+            }
+            for p in positions
+        ]
+    finally:
+        session.close()
+
+
+def delete_open_position(position_id: int) -> bool:
+    """Delete open position."""
+    with session_scope() as session:
+        position = session.query(OpenPosition).filter_by(id=position_id).first()
+        if position:
+            session.delete(position)
+            return True
+    return False
+
+
+# ===== BACKTEST RESULTS =====
+
+def save_backtest_result(result: Dict) -> int:
+    """Save backtest result."""
+    with session_scope() as session:
+        backtest = BacktestResult(
+            symbol=result['symbol'],
+            timeframe=result['timeframe'],
+            period_days=result['period_days'],
+            initial_capital=result['initial_capital'],
+            final_capital=result['final_capital'],
+            roi_pct=result['roi_pct'],
+            total_trades=result['total_trades'],
+            win_rate_pct=result['win_rate_pct'],
+            max_drawdown_pct=result['max_drawdown_pct'],
+            profit_factor=result['profit_factor'],
+            total_fees_paid=result['total_fees_paid'],
+            result_json=json.dumps(result, default=str)
+        )
+        session.add(backtest)
+        session.flush()
+        backtest_id = backtest.id
+    return backtest_id
+
+
+def get_backtest_history(limit: int = 10) -> List[Dict]:
+    """Get backtest history."""
+    session = get_db_session()
+    try:
+        results = session.query(BacktestResult).order_by(BacktestResult.created_at.desc()).limit(limit).all()
+        return [
+            {
+                'id': r.id,
+                'symbol': r.symbol,
+                'timeframe': r.timeframe,
+                'period_days': r.period_days,
+                'initial_capital': r.initial_capital,
+                'final_capital': r.final_capital,
+                'roi_pct': r.roi_pct,
+                'total_trades': r.total_trades,
+                'win_rate_pct': r.win_rate_pct,
+                'max_drawdown_pct': r.max_drawdown_pct,
+                'profit_factor': r.profit_factor,
+                'total_fees_paid': r.total_fees_paid,
+                'created_at': r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in results
+        ]
+    finally:
+        session.close()
+
+
+# ===== TRADE LEDGER (P1: Immutable Audit Log) =====
+
+def get_trade_ledger(trade_id: int) -> List[Dict]:
+    """Get ledger entries for a trade."""
+    session = get_db_session()
+    try:
+        entries = session.query(TradeLedger).filter_by(trade_id=trade_id).order_by(TradeLedger.timestamp).all()
+        return [
+            {
+                'id': e.id,
+                'trade_id': e.trade_id,
+                'event_type': e.event_type,
+                'old_state': e.old_state,
+                'new_state': e.new_state,
+                'price': e.price,
+                'amount': e.amount,
+                'value_usdt': e.value_usdt,
+                'fee': e.fee,
+                'pnl': e.pnl,
+                'reason': e.reason,
+                'timestamp': e.timestamp.isoformat() if e.timestamp else None,
+            }
+            for e in entries
+        ]
+    finally:
+        session.close()
+
+
 if __name__ == "__main__":
-    init_db()
+    # Test the adapter
+    print("✅ Database adapter initialized")
