@@ -458,7 +458,21 @@ async def auto_trading_loop():
                         sys_logger.add_log(f"⏭️ Skip {symbol}: high spread {spread_info.get('spread_pct', 0):.2f}%")
                         continue
                     
-                    signal, price, _ = await strategy.analyze_market(exchange, symbol)
+                    signal, price, indicators = await strategy.analyze_market(exchange, symbol)
+                    
+                    # Log all signals (BUY, SELL, HOLD) for frontend display
+                    if signal == "BUY":
+                        action_msg = "BUY"
+                        reason = indicators.get('reason', 'Signal detected')
+                        strategy_type = indicators.get('strategy', 'UNKNOWN')
+                        htf = indicators.get('htf_signal', 'NEUTRAL')
+                        sys_logger.add_log(f"📊 {symbol} | {strategy_type} | {reason} | HTF:{htf} -> {action_msg}")
+                    elif signal == "SELL":
+                        reason = indicators.get('reason', 'Signal detected')
+                        strategy_type = indicators.get('strategy', 'UNKNOWN')
+                        htf = indicators.get('htf_signal', 'NEUTRAL')
+                        sys_logger.add_log(f"📊 {symbol} | {strategy_type} | {reason} | HTF:{htf} -> SELL")
+                    
                     if signal != "BUY":
                         continue
 
