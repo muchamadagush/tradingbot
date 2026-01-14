@@ -13,11 +13,12 @@ import sys_logger
 
 from solders.keypair import Keypair # type: ignore
 from solders.transaction import VersionedTransaction # type: ignore
+from solders.pubkey import Pubkey # type: ignore
 from solana.rpc.async_api import AsyncClient
 
 load_dotenv()
 
-# --- 1. DAFTAR TOKEN ---
+# --- 1. DAFTAR TOKEN (with known decimals) ---
 TOKENS = {
     "SOL": "So11111111111111111111111111111111111111112",
     "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 
@@ -27,6 +28,18 @@ TOKENS = {
     "RAY": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R", 
     "JUP": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", 
     "PYTH": "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3"
+}
+
+# Known decimals for common tokens (cache seed)
+KNOWN_DECIMALS = {
+    "So11111111111111111111111111111111111111112": 9,   # SOL
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 6,  # USDC
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": 6,  # USDT
+    "DezXAZ8z7PnrnRJjz3wKhDlW5TGhPQW3Q5G6pH4Q4": 5,     # BONK
+    "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm": 6,  # WIF
+    "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R": 6,  # RAY
+    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": 6,   # JUP
+    "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3": 6,  # PYTH
 }
 
 # Map balik dari Address ke Simbol (Untuk display saldo)
@@ -54,6 +67,7 @@ class MagicResolver(DefaultResolver):
 class JupiterManager:
     def __init__(self):
         self.rpc_client = AsyncClient(RPC_URL)
+        self._decimals_cache = dict(KNOWN_DECIMALS)  # Start with known decimals
         try:
             if PRIVATE_KEY:
                 self.payer = Keypair.from_base58_string(PRIVATE_KEY)
@@ -64,6 +78,33 @@ class JupiterManager:
         except Exception as e:
             print(f"❌ Wallet Error: {e}")
             self.payer = None
+
+    # =============================
+    # TOKEN DECIMALS (ON-CHAIN)
+    # =============================
+    async def get_token_decimals(self, mint_address: str) -> int:
+        """
+        Fetch token decimals from on-chain, with caching.
+        Falls back to 6 (most common) if fetch fails.
+        """
+        # Check cache first
+        if mint_address in self._decimals_cache:
+            return self._decimals_cache[mint_address]
+        
+        try:
+            # Fetch from on-chain using getTokenSupply
+            pubkey = Pubkey.from_string(mint_address)
+            resp = await self.rpc_client.get_token_supply(pubkey)
+            decimals = int(resp.value.decimals)
+            
+            # Cache for future use
+            self._decimals_cache[mint_address] = decimals
+            return decimals
+        except Exception as e:
+            # Fallback to 6 (most common for SPL tokens)
+            print(f"⚠️ Failed to fetch decimals for {mint_address[:8]}..., using 6: {e}")
+            self._decimals_cache[mint_address] = 6
+            return 6
 
     async def _get_real_ip_via_google(self):
         try:
@@ -141,12 +182,9 @@ class JupiterManager:
             if not input_mint: return {"error": f"Token {input_token} invalid/not found"}
             if not output_mint: return {"error": f"Token {output_token} invalid/not found"}
 
-            # --- FIX DESIMAL ---
-            input_decimals = 9
-            if input_token != "SOL" and input_token != "WSOL":
-                input_decimals = 6 
-                if input_token == "BONK": input_decimals = 5
-                if input_token == "USDC" or input_token == "USDT": input_decimals = 6
+            # --- DYNAMIC DECIMALS (ON-CHAIN FETCH WITH CACHE) ---
+            input_decimals = await self.get_token_decimals(input_mint)
+            output_decimals = await self.get_token_decimals(output_mint)
             
             amount_lamport = int(float(amount_sol) * (10 ** input_decimals))
             
@@ -184,15 +222,12 @@ class JupiterManager:
                     if "outAmount" not in quote_data:
                          return {"error": f"Jupiter: {data.get('error', 'Unknown Error/Format V1')}"}
                     
-                    out_decimals = 6
-                    if output_token == "SOL": out_decimals = 9
-                    if output_token == "BONK": out_decimals = 5
-                    
+                    # Use already-fetched output_decimals (dynamic, not hardcoded)
                     out_raw = int(quote_data['outAmount'])
                     in_raw = int(quote_data.get('inAmount', amount_lamport))
                     
                     # Calculate effective price (output per input)
-                    out_amount = out_raw / (10 ** out_decimals)
+                    out_amount = out_raw / (10 ** output_decimals)
                     in_amount = in_raw / (10 ** input_decimals)
                     effective_price = out_amount / in_amount if in_amount > 0 else 0
                     
