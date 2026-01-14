@@ -329,8 +329,8 @@ async def auto_trading_loop():
     except:
         pass
 
-    TP = 0.015
-    SL = 0.03
+    TP = 0.025  # 2.5% take profit
+    SL = 0.02   # 2% stop loss (ratio 1.25:1, need ~44.44% win rate)
     TRADE_USDT = 12.0
 
     while IS_BOT_RUNNING:
