@@ -403,12 +403,14 @@ def create_auth_router():
         if not user:
             raise HTTPException(status_code=401, detail="Invalid API key")
         
+        from fastapi.responses import JSONResponse
         token = create_jwt_token(user.user_id, user.role)
-        return TokenResponse(
+        response = TokenResponse(
             access_token=token,
             expires_in=JWT_EXPIRY_HOURS * 3600,
             role=user.role.value,
         )
+        return JSONResponse(content=response.dict())
     
     @router.get("/me")
     @limiter.limit(RATE_LIMIT_READONLY)

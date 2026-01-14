@@ -4,6 +4,7 @@ Paper trading endpoints
 """
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from auth import require_trader, optional_auth, AuthUser
 from rate_limiter import limiter, RATE_LIMIT_TRADING, RATE_LIMIT_READONLY
@@ -28,6 +29,7 @@ async def paper_account(request: Request, user: AuthUser = Depends(optional_auth
     from main import exchange
     import paper_trading
     
+    from fastapi.responses import JSONResponse
     prices = {}
     for s in paper_trading.paper_account.positions:
         try:
@@ -35,7 +37,8 @@ async def paper_account(request: Request, user: AuthUser = Depends(optional_auth
             prices[s] = ticker["last"]
         except:
             pass
-    return paper_trading.paper_account.get_account_summary(prices)
+    summary = paper_trading.paper_account.get_account_summary(prices)
+    return JSONResponse(content=summary)
 
 
 @router.post("/buy")
@@ -49,7 +52,7 @@ async def paper_buy(request: Request, req: PaperBuyRequest, user: AuthUser = Dep
         ticker = await exchange.fetch_ticker(req.symbol)
         price = ticker["last"]
     except Exception as e:
-        return {"status": "failed", "reason": f"Failed to fetch price: {e}"}
+            return JSONResponse(content={"status": "failed", "reason": f"Failed to fetch price: {e}"})
     
     # Check risk before buy
     open_positions = len(paper_trading.paper_account.positions)
@@ -57,12 +60,12 @@ async def paper_buy(request: Request, req: PaperBuyRequest, user: AuthUser = Dep
     risk_check = hunter_risk.can_open_position(open_positions, wallet_balance, req.amount_usdt)
     
     if not risk_check.get("approved", False):
-        return {"status": "rejected", "reasons": risk_check.get("reasons", ["Risk check failed"])}
+            return JSONResponse(content={"status": "rejected", "reasons": risk_check.get("reasons", ["Risk check failed"])})
     
     result = paper_trading.paper_account.place_market_buy(
         req.symbol, req.amount_usdt, price
     )
-    return result
+    return JSONResponse(content=result)
 
 
 @router.post("/sell")
@@ -76,12 +79,12 @@ async def paper_sell(request: Request, req: PaperSellRequest, user: AuthUser = D
         ticker = await exchange.fetch_ticker(req.symbol)
         price = ticker["last"]
     except Exception as e:
-        return {"status": "failed", "reason": f"Failed to fetch price: {e}"}
+            return JSONResponse(content={"status": "failed", "reason": f"Failed to fetch price: {e}"})
     
     result = paper_trading.paper_account.place_market_sell(
         req.symbol, req.percentage, price
     )
-    return result
+    return JSONResponse(content=result)
 
 
 @router.post("/reset")
@@ -92,18 +95,18 @@ async def paper_reset(request: Request, user: AuthUser = Depends(require_trader)
     import paper_trading
     
     paper_trading.paper_account.reset_account(PAPER_INITIAL_BALANCE)
-    return {"status": "reset", "balance": PAPER_INITIAL_BALANCE}
+    return JSONResponse(content={"status": "reset", "balance": PAPER_INITIAL_BALANCE})
 
 
 @router.get("/orders")
 async def paper_orders():
     """Get paper trading order history."""
     import paper_trading
-    return paper_trading.paper_account.orders_history
+    return JSONResponse(content=paper_trading.paper_account.orders_history)
 
 
 @router.get("/trades")
 async def paper_trades():
     """Get paper trading trade history."""
     import paper_trading
-    return paper_trading.paper_account.trades_history
+    return JSONResponse(content=paper_trading.paper_account.trades_history)

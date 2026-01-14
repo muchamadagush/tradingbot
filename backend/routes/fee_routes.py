@@ -35,7 +35,7 @@ async def fee_calculate_buy(req: FeeCalcRequest):
     from main import fee_calc
     order_type = 'limit' if req.is_maker else 'market'
     result = fee_calc.calculate_buy_cost(req.amount, req.price, order_type)
-    return result
+    return JSONResponse(content=result)
 
 
 @router.post("/calculate-sell")
@@ -44,7 +44,7 @@ async def fee_calculate_sell(req: FeeCalcRequest):
     from main import fee_calc
     order_type = 'limit' if req.is_maker else 'market'
     result = fee_calc.calculate_sell_proceeds(req.amount, req.price, order_type)
-    return result
+    return JSONResponse(content=result)
 
 
 @router.post("/round-trip")
@@ -52,7 +52,7 @@ async def fee_round_trip(req: RoundTripRequest):
     """Calculate round-trip (buy+sell) fees and profit."""
     from main import fee_calc
     result = fee_calc.calculate_round_trip_cost(req.amount, req.buy_price)
-    return result
+    return JSONResponse(content=result)
 
 
 @router.post("/profit-target")
@@ -62,4 +62,4 @@ async def fee_profit_target(req: ProfitTargetRequest):
     result = fee_calc.calculate_profit_target(
         req.entry_price, req.amount, req.target_profit_pct
     )
-    return result
+    return JSONResponse(content=result)

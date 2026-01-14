@@ -1,6 +1,10 @@
 # File: backend/sys_logger.py
 from datetime import datetime
 
+# Alias for compatibility with sys_logger.log(...)
+def log(message):
+    add_log(message)
+
 # Buffer untuk menyimpan 50 log terakhir
 log_buffer = []
 

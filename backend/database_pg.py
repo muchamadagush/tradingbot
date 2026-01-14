@@ -33,7 +33,7 @@ from contextlib import contextmanager
 # ===== CONFIGURATION =====
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://trader:password@localhost:5432/crypto_bot"
+    "postgresql://postgres:postgres@127.0.0.1:5432/crypto_bot"
 )
 
 # Create engine with connection pooling

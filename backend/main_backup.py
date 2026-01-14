@@ -545,10 +545,11 @@ async def toggle_bot(bg: BackgroundTasks):
 
     IS_BOT_RUNNING = not IS_BOT_RUNNING
 
+    from fastapi.responses import JSONResponse
     if IS_BOT_RUNNING:
         bg.add_task(auto_trading_loop)
-        return {"status": "running"}
-    return {"status": "stopped"}
+        return JSONResponse(content={"status": "running"})
+    return JSONResponse(content={"status": "stopped"})
 
 @app.get("/api/bot/status")
 def bot_status():

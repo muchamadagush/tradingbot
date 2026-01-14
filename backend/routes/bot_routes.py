@@ -4,6 +4,7 @@ Bot control and trade history endpoints
 """
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from auth import require_trader, require_admin, optional_auth, AuthUser
 from rate_limiter import limiter, RATE_LIMIT_TRADING, RATE_LIMIT_READONLY
@@ -36,15 +37,15 @@ async def toggle_bot(request: Request, bg: BackgroundTasks, user: AuthUser = Dep
     
     main.IS_BOT_RUNNING = not main.IS_BOT_RUNNING
 
+    from fastapi.responses import JSONResponse
     if main.IS_BOT_RUNNING:
         bg.add_task(auto_trading_loop)
         # Broadcast status change via WebSocket
         asyncio.create_task(ws_manager.broadcast_bot_status(True, main.CURRENT_SCAN_TARGET))
-        return {"status": "running", "toggled_by": user.user_id}
-    
+        return JSONResponse(content={"status": "running", "toggled_by": user.user_id})
     # Broadcast status change via WebSocket
     asyncio.create_task(ws_manager.broadcast_bot_status(False, "Stopped"))
-    return {"status": "stopped", "toggled_by": user.user_id}
+    return JSONResponse(content={"status": "stopped", "toggled_by": user.user_id})
 
 
 @router.get("/bot/status")
@@ -52,12 +53,13 @@ async def toggle_bot(request: Request, bg: BackgroundTasks, user: AuthUser = Dep
 def bot_status(request: Request):
     """Get current bot status."""
     from main import IS_BOT_RUNNING, CURRENT_SCAN_TARGET
-    return {
+    from fastapi.responses import JSONResponse
+    return JSONResponse(content={
         "is_running": IS_BOT_RUNNING,
         "current_activity": CURRENT_SCAN_TARGET,
         "running": IS_BOT_RUNNING,  # Legacy
         "activity": CURRENT_SCAN_TARGET,  # Legacy
-    }
+    })
 
 
 @router.get("/bot/mode")
@@ -86,9 +88,9 @@ def trade_history():
                 'total_usdt': t.total_usdt,
                 'status': t.status,
                 'profit_usdt': t.profit_usdt,
-                'created_at': t.created_at.isoformat() if t.created_at else None,
-                'entry_time': t.created_at.isoformat() if t.created_at else None,
-                'exit_time': t.closed_at.isoformat() if t.closed_at else None,
+                'created_at': t.created_at.isoformat() if t.created_at else "-",
+                'entry_time': t.created_at.isoformat() if t.created_at else "-",
+                'exit_time': t.closed_at.isoformat() if t.closed_at else ("Open" if t.status in ("OPEN", "PENDING", "CLOSING") else "-"),
                 'bot_type': t.bot_type,
                 'mode': t.mode,
                 'source': 'Hunter',
@@ -190,9 +192,8 @@ async def get_active_positions(request: Request, user: AuthUser = Depends(option
     from main import get_all_active_trades, exchange
     
     active_trades = get_all_active_trades()
-    
     if not active_trades:
-        return {"positions": [], "count": 0, "total_value": 0}
+        return JSONResponse(content={"positions": [], "count": 0, "total_value": 0})
     
     positions = []
     total_value = 0
@@ -227,12 +228,12 @@ async def get_active_positions(request: Request, user: AuthUser = Depends(option
         total_value += current_value
         total_unrealized_pnl += unrealized_pnl
     
-    return {
+    return JSONResponse(content={
         "positions": positions,
         "count": len(positions),
         "total_value": total_value,
         "total_unrealized_pnl": total_unrealized_pnl,
-    }
+    })
 
 
 @router.post("/positions/close-all")
@@ -249,11 +250,11 @@ async def close_all_positions(request: Request, req: ClosePositionRequest, user:
     from main import cleanup_open_positions
     
     result = await cleanup_open_positions(action=req.action)
-    return {
+    return JSONResponse(content={
         "action": req.action,
         "result": result,
         "closed_by": user.user_id,
-    }
+    })
 
 
 @router.post("/positions/emergency-close")
@@ -263,11 +264,11 @@ async def emergency_close(request: Request, user: AuthUser = Depends(require_adm
     from main import emergency_close_all_positions
     
     result = await emergency_close_all_positions()
-    return {
+    return JSONResponse(content={
         "action": "emergency_close",
         "result": result,
         "triggered_by": user.user_id,
-    }
+    })
 
 
 @router.post("/positions/{trade_id}/close")
@@ -286,7 +287,7 @@ async def close_single_position(request: Request, trade_id: int, user: AuthUser 
         ).first()
         
         if not trade:
-            return {"error": "Trade not found or already closed", "trade_id": trade_id}
+            return JSONResponse(content={"error": "Trade not found or already closed", "trade_id": trade_id})
         
         symbol = trade.symbol
         buy_price = trade.buy_price
@@ -298,7 +299,7 @@ async def close_single_position(request: Request, trade_id: int, user: AuthUser 
         ticker = await exchange.fetch_ticker(symbol)
         current_price = ticker["last"]
     except Exception as e:
-        return {"error": f"Failed to fetch price: {e}", "trade_id": trade_id}
+        return JSONResponse(content={"error": f"Failed to fetch price: {e}", "trade_id": trade_id})
     
     profit = (current_price - buy_price) * amount
     pnl_pct = ((current_price - buy_price) / buy_price) * 100
@@ -311,13 +312,13 @@ async def close_single_position(request: Request, trade_id: int, user: AuthUser 
             check_liquidity_first=False
         )
         if not sell_result["success"]:
-            return {"error": f"Sell failed: {sell_result.get('error')}", "trade_id": trade_id}
+            return JSONResponse(content={"error": f"Sell failed: {sell_result.get('error')}", "trade_id": trade_id})
     
     # Update database
     save_sell_trade(trade_id, current_price, profit, reason="MANUAL_CLOSE")
     hunter_risk.record_trade_pnl(profit)
     
-    return {
+    return JSONResponse(content={
         "status": "closed",
         "trade_id": trade_id,
         "symbol": symbol,
@@ -327,4 +328,4 @@ async def close_single_position(request: Request, trade_id: int, user: AuthUser 
         "profit": profit,
         "pnl_pct": pnl_pct,
         "closed_by": user.user_id,
-    }
+    })
