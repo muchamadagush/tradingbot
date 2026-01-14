@@ -26,6 +26,39 @@ _sol_price_cache = {
 }
 
 # =========================================
+# ANALYTICS SUMMARY API FUNCTIONS
+# =========================================
+
+def get_analytics_summary():
+    """
+    Returns a combined summary of Solana and Tokocrypto analytics.
+    """
+    sol_price = get_current_sol_price()
+    solana = calculate_solana_analytics(sol_to_usd=sol_price)
+    toko = calculate_tokocrypto_analytics()
+    return {
+        "solana": solana["summary"] if "summary" in solana else {},
+        "tokocrypto": toko["summary"] if "summary" in toko else {}
+    }
+
+def get_performance_metrics():
+    """
+    Returns performance metrics for Solana and Tokocrypto (alias for summary).
+    """
+    return get_analytics_summary()
+
+def get_daily_pnl():
+    """
+    Returns daily P&L breakdown for Solana and Tokocrypto.
+    """
+    sol_price = get_current_sol_price()
+    solana = calculate_solana_analytics(timeframe="daily", sol_to_usd=sol_price)
+    toko = calculate_tokocrypto_analytics(timeframe="daily")
+    return {
+        "solana": solana["data"] if "data" in solana else [],
+        "tokocrypto": toko["data"] if "data" in toko else []
+    }
+# =========================================
 # SOLANA ANALYTICS
 # =========================================
 

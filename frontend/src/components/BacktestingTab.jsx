@@ -227,21 +227,21 @@ export function BacktestingTab() {
                   <tbody>
                     {result.trades.map((trade, idx) => (
                       <tr key={idx} style={{borderBottom: '1px solid #eee'}}>
-                        <td style={{padding: '8px'}}>${trade.entry_price.toFixed(2)}</td>
-                        <td style={{padding: '8px'}}>${trade.exit_price.toFixed(2)}</td>
+                        <td style={{padding: '8px'}}>${typeof trade.entry_price === 'number' ? trade.entry_price.toFixed(2) : '-'}</td>
+                        <td style={{padding: '8px'}}>${typeof trade.exit_price === 'number' ? trade.exit_price.toFixed(2) : '-'}</td>
                         <td style={{
                           padding: '8px',
                           textAlign: 'right',
-                          color: trade.profit >= 0 ? 'green' : 'red'
+                          color: typeof trade.profit === 'number' && trade.profit >= 0 ? 'green' : 'red'
                         }}>
-                          ${trade.profit.toFixed(2)}
+                          ${typeof trade.profit === 'number' ? trade.profit.toFixed(2) : '0.00'}
                         </td>
                         <td style={{
                           padding: '8px',
                           textAlign: 'right',
-                          color: trade.profit_pct >= 0 ? 'green' : 'red'
+                          color: typeof trade.profit_pct === 'number' && trade.profit_pct >= 0 ? 'green' : 'red'
                         }}>
-                          {trade.profit_pct.toFixed(2)}%
+                          {typeof trade.profit_pct === 'number' ? trade.profit_pct.toFixed(2) : '0.00'}%
                         </td>
                       </tr>
                     ))}

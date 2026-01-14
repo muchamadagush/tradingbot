@@ -1,13 +1,7 @@
 {
   "initial_balance": 1000.0,
-  "balance": 900.0,
-  "positions": {
-    "BTC/USDT": {
-      "amount": 0.0010934434612679701,
-      "entry_price": 91362.748545,
-      "timestamp": "2026-01-09T05:24:59.837028"
-    }
-  },
+  "balance": 1003.7149889313489,
+  "positions": {},
   "orders_history": [
     {
       "id": 1,
@@ -19,8 +13,37 @@
       "fee": 0.1,
       "timestamp": "2026-01-09T05:24:59.837028",
       "status": "filled"
+    },
+    {
+      "id": 2,
+      "type": "MARKET_SELL",
+      "symbol": "BTC/USDT",
+      "asset_amount": 0.0010934434612679701,
+      "market_price": 94994.16,
+      "execution_price": 94946.66292,
+      "gross_proceeds": 103.81880773908804,
+      "proceeds": 103.71498893134896,
+      "fee": 0.10381880773908804,
+      "fee_pct": 0.1,
+      "slippage_cost": 0.05193537155532168,
+      "slippage_pct": 0.05,
+      "timestamp": "2026-01-14T18:35:22.210677",
+      "status": "filled"
     }
   ],
-  "trades_history": [],
-  "last_updated": "2026-01-09T05:24:59.837028"
+  "trades_history": [
+    {
+      "id": 1,
+      "symbol": "BTC/USDT",
+      "entry_price": 91362.748545,
+      "exit_price": 94946.66292,
+      "amount": 0.0010934434612679701,
+      "profit": 3.8149889313489638,
+      "profit_pct": 3.818807739088052,
+      "entry_time": "2026-01-09T05:24:59.837028",
+      "exit_time": "2026-01-14T18:35:22.211677",
+      "fees_paid": 0.10381880773908804
+    }
+  ],
+  "last_updated": "2026-01-14T18:35:22.211677"
 }
