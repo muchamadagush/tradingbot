@@ -261,20 +261,25 @@ function App() {
 
   // Polling fallback when WebSocket is not connected
   useEffect(() => {
+    let interval;
+    // Fallback polling: only if fallback/disconnected
     if (shouldUseFallback) {
-      console.log('[Polling] WebSocket unavailable, using fallback polling')
-      const interval = setInterval(fetchData, 2000)
-      return () => clearInterval(interval)
-    } else if (isConnected) {
-      // When connected via WS, fetch data less frequently for things not pushed via WS
-      // (like balances, prices which may not be pushed every time)
-      const interval = setInterval(() => {
-        // Only fetch data that's not pushed via WebSocket
+      console.log('[Polling] Fallback polling aktif (WS tidak connect)', { shouldUseFallback, isConnected, connectionState })
+      interval = setInterval(fetchData, 2000)
+    } else if (!shouldUseFallback && isConnected && connectionState === 'connected') {
+      // Light polling: only if fallback polling is NOT active
+      console.log('[Polling] WS connected, polling ringan balances/prices', { shouldUseFallback, isConnected, connectionState })
+      interval = setInterval(() => {
         fetchBalancesAndPrices()
       }, 5000)
-      return () => clearInterval(interval)
+    } else {
+      // No polling if reconnecting or unknown state
+      console.log('[Polling] Tidak ada polling (reconnecting/unknown)', { shouldUseFallback, isConnected, connectionState })
     }
-  }, [shouldUseFallback, isConnected])
+    return () => {
+      if (interval) clearInterval(interval)
+    }
+  }, [shouldUseFallback, isConnected, connectionState])
 
   // Lighter fetch for WS-connected mode
   const fetchBalancesAndPrices = async () => {
