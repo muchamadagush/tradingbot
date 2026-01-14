@@ -3,8 +3,9 @@
 Paper trading endpoints
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from auth import require_trader, optional_auth, AuthUser
 
 router = APIRouter(prefix="/api/paper", tags=["paper"])
 
@@ -20,8 +21,8 @@ class PaperSellRequest(BaseModel):
 
 
 @router.get("/account")
-async def paper_account():
-    """Get paper trading account summary."""
+async def paper_account(user: AuthUser = Depends(optional_auth)):
+    """Get paper trading account summary. Read-only access."""
     from main import exchange
     import paper_trading
     
@@ -36,8 +37,8 @@ async def paper_account():
 
 
 @router.post("/buy")
-async def paper_buy(req: PaperBuyRequest):
-    """Execute paper buy order."""
+async def paper_buy(req: PaperBuyRequest, user: AuthUser = Depends(require_trader)):
+    """Execute paper buy order. Requires trader role."""
     from main import exchange, hunter_risk
     import paper_trading
     
@@ -62,8 +63,8 @@ async def paper_buy(req: PaperBuyRequest):
 
 
 @router.post("/sell")
-async def paper_sell(req: PaperSellRequest):
-    """Execute paper sell order."""
+async def paper_sell(req: PaperSellRequest, user: AuthUser = Depends(require_trader)):
+    """Execute paper sell order. Requires trader role."""
     from main import exchange
     import paper_trading
     
@@ -80,12 +81,13 @@ async def paper_sell(req: PaperSellRequest):
 
 
 @router.post("/reset")
-async def paper_reset():
-    """Reset paper trading account."""
+async def paper_reset(user: AuthUser = Depends(require_trader)):
+    """Reset paper trading account. Requires trader role."""
     from main import PAPER_INITIAL_BALANCE
     import paper_trading
     
     paper_trading.paper_account.reset_account(PAPER_INITIAL_BALANCE)
+    return {"status": "reset", "balance": PAPER_INITIAL_BALANCE}
     return {"status": "reset", "balance": PAPER_INITIAL_BALANCE}
 
 

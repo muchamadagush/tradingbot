@@ -3,8 +3,9 @@
 Bot control and trade history endpoints
 """
 
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel
+from auth import require_trader, optional_auth, AuthUser
 
 router = APIRouter(prefix="/api", tags=["bot"])
 
@@ -24,8 +25,8 @@ def home():
 
 
 @router.post("/bot/toggle")
-async def toggle_bot(bg: BackgroundTasks):
-    """Toggle the Hunter trading bot on/off."""
+async def toggle_bot(bg: BackgroundTasks, user: AuthUser = Depends(require_trader)):
+    """Toggle the Hunter trading bot on/off. Requires trader role."""
     from main import IS_BOT_RUNNING, auto_trading_loop, CURRENT_SCAN_TARGET
     from websocket_manager import ws_manager
     import main
@@ -37,11 +38,11 @@ async def toggle_bot(bg: BackgroundTasks):
         bg.add_task(auto_trading_loop)
         # Broadcast status change via WebSocket
         asyncio.create_task(ws_manager.broadcast_bot_status(True, main.CURRENT_SCAN_TARGET))
-        return {"status": "running"}
+        return {"status": "running", "toggled_by": user.user_id}
     
     # Broadcast status change via WebSocket
     asyncio.create_task(ws_manager.broadcast_bot_status(False, "Stopped"))
-    return {"status": "stopped"}
+    return {"status": "stopped", "toggled_by": user.user_id}
 
 
 @router.get("/bot/status")

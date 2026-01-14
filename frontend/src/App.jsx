@@ -8,6 +8,10 @@ import { RiskManagementTab } from './components/RiskManagementTab'
 import { FeeCalculatorTab } from './components/FeeCalculatorTab'
 import AnalyticsTab from './components/AnalyticsTab'
 import { useWebSocket } from './hooks/useWebSocket'
+import { authService, configureAxiosAuth } from './services/authService'
+
+// Configure axios with auth headers
+configureAxiosAuth(axios)
 
 const VITE_API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 const VITE_WS_URL = import.meta.env.VITE_WS_URL || VITE_API_URL.replace('http', 'ws') + '/ws'
@@ -15,6 +19,9 @@ const VITE_WS_URL = import.meta.env.VITE_WS_URL || VITE_API_URL.replace('http', 
 function App() {
   const [serverStatus, setServerStatus] = useState("Checking...")
   const [activeTab, setActiveTab] = useState('trading')
+  const [authRequired, setAuthRequired] = useState(false)
+  const [apiKeyInput, setApiKeyInput] = useState('')
+  const [authError, setAuthError] = useState('')
 
   // --- STATE BOT HUNTER (Tokocrypto) ---
   const [botStatus, setBotStatus] = useState({ is_running: false, current_activity: "Idle" })
@@ -215,6 +222,43 @@ function App() {
   // Initial data fetch
   useEffect(() => { fetchData() }, [])
 
+  // Check auth status and handle auth:expired event
+  useEffect(() => {
+    const checkAuth = async () => {
+      const status = await authService.checkAuthStatus()
+      if (status.auth_enabled && !authService.isAuthenticated()) {
+        setAuthRequired(true)
+      }
+    }
+    checkAuth()
+    
+    const handleAuthExpired = () => {
+      setAuthRequired(true)
+      setAuthError('Session expired. Please login again.')
+    }
+    window.addEventListener('auth:expired', handleAuthExpired)
+    return () => window.removeEventListener('auth:expired', handleAuthExpired)
+  }, [])
+
+  // Handle login
+  const handleLogin = async () => {
+    setAuthError('')
+    const result = await authService.login(apiKeyInput)
+    if (result.success) {
+      setAuthRequired(false)
+      setApiKeyInput('')
+      fetchData()
+    } else {
+      setAuthError(result.error || 'Login failed')
+    }
+  }
+
+  // Handle logout
+  const handleLogout = () => {
+    authService.logout()
+    setAuthRequired(true)
+  }
+
   // Polling fallback when WebSocket is not connected
   useEffect(() => {
     if (shouldUseFallback) {
@@ -270,11 +314,74 @@ function App() {
     { id: 'analytics', label: '📈 Analytics', icon: '📉' }
   ]
 
+  // Login form if auth required
+  if (authRequired) {
+    return (
+      <div style={{ 
+        padding: '20px', fontFamily: 'Arial', maxWidth: '400px', margin: '100px auto', 
+        color: '#ecf0f1', backgroundColor: '#2c3e50', borderRadius: '10px'
+      }}>
+        <div style={{ textAlign: 'center', marginBottom: '30px' }}>
+          <h1>🦅 Crypto Hybrid Bot</h1>
+          <p style={{ color: '#bdc3c7' }}>Authentication Required</p>
+        </div>
+        
+        <div style={{ marginBottom: '20px' }}>
+          <label style={{ display: 'block', marginBottom: '8px', color: '#bdc3c7' }}>API Key</label>
+          <input
+            type="password"
+            value={apiKeyInput}
+            onChange={(e) => setApiKeyInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+            placeholder="Enter your API key"
+            style={{
+              width: '100%', padding: '12px', borderRadius: '5px', border: '1px solid #34495e',
+              backgroundColor: '#34495e', color: '#ecf0f1', fontSize: '14px', boxSizing: 'border-box'
+            }}
+          />
+        </div>
+        
+        {authError && (
+          <p style={{ color: '#e74c3c', marginBottom: '15px', fontSize: '14px' }}>{authError}</p>
+        )}
+        
+        <button
+          onClick={handleLogin}
+          style={{
+            width: '100%', padding: '12px', backgroundColor: '#3498db', color: 'white',
+            border: 'none', borderRadius: '5px', fontSize: '16px', cursor: 'pointer',
+            fontWeight: 'bold'
+          }}
+        >
+          🔓 Login
+        </button>
+        
+        <p style={{ marginTop: '20px', fontSize: '12px', color: '#7f8c8d', textAlign: 'center' }}>
+          Set BOT_API_KEY in .env or API_KEYS for multiple keys.<br/>
+          Set AUTH_MODE=disabled to skip authentication.
+        </p>
+      </div>
+    )
+  }
+
   return (
     <div style={{ padding: '20px', fontFamily: 'Arial', maxWidth: '1200px', margin: '0 auto', color: '#ecf0f1', backgroundColor: '#2c3e50', minHeight: '100vh' }}>
 
       <div style={{ textAlign: 'center', marginBottom: '30px' }}>
-        <h1>🦅 Crypto Hybrid Bot</h1>
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '20px' }}>
+          <h1 style={{ margin: 0 }}>🦅 Crypto Hybrid Bot</h1>
+          {authService.isAuthenticated() && authService.authEnabled && (
+            <button
+              onClick={handleLogout}
+              style={{
+                padding: '6px 12px', backgroundColor: 'transparent', color: '#e74c3c',
+                border: '1px solid #e74c3c', borderRadius: '4px', fontSize: '12px', cursor: 'pointer'
+              }}
+            >
+              Logout
+            </button>
+          )}
+        </div>
         <p style={{ fontSize: '14px', color: '#bdc3c7' }}>
           System: <span style={{ color: connectionDisplay.color, fontWeight: 'bold' }}>{connectionDisplay.text}</span>
           {isConnected && <span style={{ marginLeft: '8px', fontSize: '10px' }}>⚡ Real-time</span>}

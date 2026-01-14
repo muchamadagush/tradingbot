@@ -625,8 +625,10 @@ from routes import (
     bot_router, paper_router, solana_router, risk_router,
     backtest_router, analytics_router, fee_router, system_router
 )
+from auth import auth_router
 
 # Mount all routers
+app.include_router(auth_router)  # Auth endpoints first
 app.include_router(bot_router)
 app.include_router(paper_router)
 app.include_router(solana_router)

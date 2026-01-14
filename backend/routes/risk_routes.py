@@ -3,8 +3,9 @@
 Risk management endpoints
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from auth import require_admin, require_trader, optional_auth, AuthUser
 
 router = APIRouter(prefix="/api", tags=["risk"])
 
@@ -16,41 +17,42 @@ class PositionSizeRequest(BaseModel):
 
 
 @router.get("/killswitch/status")
-def killswitch_status():
-    """Get current kill switch status and limits."""
+def killswitch_status(user: AuthUser = Depends(optional_auth)):
+    """Get current kill switch status and limits. Read-only access."""
     from global_kill_switch import kill_switch
     return kill_switch.get_status()
 
 
 @router.post("/killswitch/toggle")
-def killswitch_toggle(enabled: bool = True):
-    """Enable or disable manual kill switch."""
+def killswitch_toggle(enabled: bool = True, user: AuthUser = Depends(require_admin)):
+    """Enable or disable manual kill switch. Requires admin role."""
     from global_kill_switch import kill_switch
     success = kill_switch.set_manual_kill(enabled)
     return {
         "success": success,
         "manual_kill_enabled": enabled,
-        "trading_allowed": kill_switch.is_trading_allowed()
+        "trading_allowed": kill_switch.is_trading_allowed(),
+        "toggled_by": user.user_id
     }
 
 
 @router.get("/killswitch/check")
-def killswitch_check():
-    """Quick check if trading is allowed."""
+def killswitch_check(user: AuthUser = Depends(optional_auth)):
+    """Quick check if trading is allowed. Read-only access."""
     from global_kill_switch import kill_switch
     return {"trading_allowed": kill_switch.is_trading_allowed()}
 
 
 @router.get("/risk/bots")
-def risk_all_bots():
-    """Get risk status for all bots (Hunter, Trader, Sniper)."""
+def risk_all_bots(user: AuthUser = Depends(optional_auth)):
+    """Get risk status for all bots (Hunter, Trader, Sniper). Read-only access."""
     from main import bot_risk
     return bot_risk.get_all_status()
 
 
 @router.get("/risk/hunter")
-def risk_hunter():
-    """Get Hunter bot risk status."""
+def risk_hunter(user: AuthUser = Depends(optional_auth)):
+    """Get Hunter bot risk status. Read-only access."""
     from main import hunter_risk
     return {
         "bot_type": "HUNTER",
@@ -65,8 +67,8 @@ def risk_hunter():
 
 
 @router.get("/risk/trader")
-def risk_trader():
-    """Get Trader bot risk status."""
+def risk_trader(user: AuthUser = Depends(optional_auth)):
+    """Get Trader bot risk status. Read-only access."""
     from main import trader_risk
     return {
         "bot_type": "TRADER",
