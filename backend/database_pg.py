@@ -268,6 +268,36 @@ class OpenPosition(Base):
         return f"<OpenPosition {self.symbol} {self.amount} @ {self.entry_price}>"
 
 
+class RiskManagerState(Base):
+    """
+    Persisted risk manager state per bot type.
+    Survives server restarts to maintain risk limits.
+    """
+    __tablename__ = "risk_manager_state"
+
+    id = Column(Integer, primary_key=True)
+    bot_type = Column(String(20), nullable=False, unique=True, index=True)
+    
+    # Daily tracking
+    daily_pnl = Column(Float, default=0.0, nullable=False)
+    trades_today = Column(Integer, default=0, nullable=False)
+    last_reset_date = Column(String(10), nullable=False)  # YYYY-MM-DD format
+    
+    # Balance tracking
+    peak_balance = Column(Float, default=1000.0, nullable=False)
+    current_balance = Column(Float, default=1000.0, nullable=False)
+    
+    # Cooldown tracking
+    last_loss_timestamp = Column(Float, default=0.0, nullable=False)
+    consecutive_losses = Column(Integer, default=0, nullable=False)
+    
+    # Metadata
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def __repr__(self):
+        return f"<RiskManagerState {self.bot_type} daily_pnl={self.daily_pnl}>"
+
+
 # ===== DATABASE INITIALIZATION =====
 def init_pg_db():
     """
@@ -432,6 +462,67 @@ def set_system_flag(key: str, value: str):
             flag.value = value
         else:
             session.add(SystemFlag(key=key, value=value))
+        session.commit()
+    finally:
+        session.close()
+
+
+# ===== RISK MANAGER STATE PERSISTENCE =====
+def get_risk_manager_state(bot_type: str) -> Optional[dict]:
+    """Get persisted risk manager state for a bot type."""
+    session = get_db_session()
+    try:
+        state = session.query(RiskManagerState).filter_by(bot_type=bot_type).first()
+        if state:
+            return {
+                "bot_type": state.bot_type,
+                "daily_pnl": state.daily_pnl,
+                "trades_today": state.trades_today,
+                "last_reset_date": state.last_reset_date,
+                "peak_balance": state.peak_balance,
+                "current_balance": state.current_balance,
+                "last_loss_timestamp": state.last_loss_timestamp,
+                "consecutive_losses": state.consecutive_losses,
+            }
+        return None
+    finally:
+        session.close()
+
+
+def save_risk_manager_state(
+    bot_type: str,
+    daily_pnl: float,
+    trades_today: int,
+    last_reset_date: str,
+    peak_balance: float,
+    current_balance: float,
+    last_loss_timestamp: float,
+    consecutive_losses: int,
+):
+    """Save/update risk manager state for a bot type."""
+    session = get_db_session()
+    try:
+        state = session.query(RiskManagerState).filter_by(bot_type=bot_type).first()
+        if state:
+            state.daily_pnl = daily_pnl
+            state.trades_today = trades_today
+            state.last_reset_date = last_reset_date
+            state.peak_balance = peak_balance
+            state.current_balance = current_balance
+            state.last_loss_timestamp = last_loss_timestamp
+            state.consecutive_losses = consecutive_losses
+        else:
+            state = RiskManagerState(
+                bot_type=bot_type,
+                daily_pnl=daily_pnl,
+                trades_today=trades_today,
+                last_reset_date=last_reset_date,
+                peak_balance=peak_balance,
+                current_balance=current_balance,
+                last_loss_timestamp=last_loss_timestamp,
+                consecutive_losses=consecutive_losses,
+            )
+            session.add(state)
         session.commit()
     finally:
         session.close()

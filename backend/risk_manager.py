@@ -6,6 +6,7 @@ from datetime import date
 from typing import Dict, List, Optional
 from pydantic import BaseModel
 from enum import Enum
+import time
 
 
 # ==========================================
@@ -80,16 +81,19 @@ class RiskManager:
     - Position sizing
     - Kelly criterion
     - Per-bot risk profiles (NEW)
+    - State persistence to PostgreSQL (NEW)
     """
 
     def __init__(
         self, 
         initial_balance: float = 1000.0, 
         limits: RiskLimits = None,
-        bot_type: Optional[BotType] = None
+        bot_type: Optional[BotType] = None,
+        enable_persistence: bool = True
     ):
         self.initial_balance = float(initial_balance)
         self.bot_type = bot_type
+        self.enable_persistence = enable_persistence
         
         # Use bot-specific limits if bot_type provided, else use passed limits or defaults
         if bot_type and bot_type in BOT_RISK_PROFILES:
@@ -109,6 +113,69 @@ class RiskManager:
         # NEW: Cooldown tracking
         self.last_loss_timestamp = 0.0
         self.consecutive_losses = 0
+        
+        # Load persisted state if available
+        if enable_persistence and bot_type:
+            self._load_state_from_db()
+
+    # ======================================
+    # PERSISTENCE METHODS (NEW)
+    # ======================================
+
+    def _load_state_from_db(self):
+        """Load risk manager state from PostgreSQL on startup."""
+        try:
+            from database_pg import get_risk_manager_state
+            
+            bot_type_str = self.bot_type.value if self.bot_type else "DEFAULT"
+            state = get_risk_manager_state(bot_type_str)
+            
+            if state:
+                # Check if date changed - if so, reset daily counters
+                saved_date = state.get("last_reset_date", "")
+                today_str = date.today().isoformat()
+                
+                if saved_date == today_str:
+                    # Same day - restore state
+                    self.daily_pnl = state.get("daily_pnl", 0.0)
+                    self.trades_today = state.get("trades_today", 0)
+                else:
+                    # New day - reset daily counters but keep balance tracking
+                    self.daily_pnl = 0.0
+                    self.trades_today = 0
+                
+                # Always restore balance tracking
+                self.peak_balance = state.get("peak_balance", self.initial_balance)
+                self.current_balance = state.get("current_balance", self.initial_balance)
+                self.last_loss_timestamp = state.get("last_loss_timestamp", 0.0)
+                self.consecutive_losses = state.get("consecutive_losses", 0)
+                self.last_reset_date = date.today()
+                
+                print(f"✅ Loaded risk state for {bot_type_str}: daily_pnl=${self.daily_pnl:.2f}, trades={self.trades_today}")
+        except Exception as e:
+            print(f"⚠️ Could not load risk state: {e}")
+
+    def _save_state_to_db(self):
+        """Save current risk manager state to PostgreSQL."""
+        if not self.enable_persistence or not self.bot_type:
+            return
+            
+        try:
+            from database_pg import save_risk_manager_state
+            
+            bot_type_str = self.bot_type.value if self.bot_type else "DEFAULT"
+            save_risk_manager_state(
+                bot_type=bot_type_str,
+                daily_pnl=self.daily_pnl,
+                trades_today=self.trades_today,
+                last_reset_date=self.last_reset_date.isoformat(),
+                peak_balance=self.peak_balance,
+                current_balance=self.current_balance,
+                last_loss_timestamp=self.last_loss_timestamp,
+                consecutive_losses=self.consecutive_losses,
+            )
+        except Exception as e:
+            print(f"⚠️ Could not save risk state: {e}")
 
     # ======================================
     # INTERNAL HELPERS
@@ -131,9 +198,8 @@ class RiskManager:
         """
         Called AFTER position is closed (SELL).
         Updates balances and checks risk limits.
+        Persists state to DB after update.
         """
-        import time
-        
         self._reset_daily_if_needed()
 
         pnl = float(pnl)
@@ -153,11 +219,12 @@ class RiskManager:
             self.peak_balance = self.current_balance
 
         self._check_limits()
+        
+        # Persist state to database
+        self._save_state_to_db()
 
     def is_in_cooldown(self) -> bool:
         """Check if bot is in cooldown period after a loss."""
-        import time
-        
         if self.limits.cooldown_after_loss_seconds <= 0:
             return False
             
@@ -169,8 +236,6 @@ class RiskManager:
 
     def get_cooldown_remaining(self) -> int:
         """Get remaining cooldown seconds."""
-        import time
-        
         if not self.is_in_cooldown():
             return 0
             
@@ -373,17 +438,20 @@ class BotRiskRegistry:
     """
     Manages per-bot RiskManager instances.
     Each bot type gets its own risk manager with appropriate limits.
+    State is persisted to PostgreSQL for each bot type.
     """
     
-    def __init__(self, initial_balance: float = 1000.0):
+    def __init__(self, initial_balance: float = 1000.0, enable_persistence: bool = True):
         self.initial_balance = initial_balance
+        self.enable_persistence = enable_persistence
         self._managers: Dict[BotType, RiskManager] = {}
         
-        # Initialize all bot managers
+        # Initialize all bot managers (will load from DB if persistence enabled)
         for bot_type in BotType:
             self._managers[bot_type] = RiskManager(
                 initial_balance=initial_balance,
-                bot_type=bot_type
+                bot_type=bot_type,
+                enable_persistence=enable_persistence
             )
     
     def get(self, bot_type: BotType) -> RiskManager:
@@ -391,7 +459,8 @@ class BotRiskRegistry:
         if bot_type not in self._managers:
             self._managers[bot_type] = RiskManager(
                 initial_balance=self.initial_balance,
-                bot_type=bot_type
+                bot_type=bot_type,
+                enable_persistence=self.enable_persistence
             )
         return self._managers[bot_type]
     
@@ -423,8 +492,9 @@ class BotRiskRegistry:
         }
     
     def sync_balance(self, new_balance: float):
-        """Sync balance across all bot managers."""
+        """Sync balance across all bot managers and persist."""
         for mgr in self._managers.values():
             mgr.current_balance = new_balance
             if new_balance > mgr.peak_balance:
                 mgr.peak_balance = new_balance
+            mgr._save_state_to_db()
