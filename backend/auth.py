@@ -421,16 +421,17 @@ def create_auth_router():
             "role": user.role.value,
         }
     
+    from fastapi.responses import JSONResponse
     @router.get("/status")
     @limiter.limit(RATE_LIMIT_READONLY)
     async def auth_status(request: Request):
         """Get auth configuration status (public)."""
-        return {
+        return JSONResponse(content={
             "auth_mode": AUTH_MODE,
             "auth_enabled": AUTH_MODE != "disabled",
             "jwt_enabled": AUTH_MODE in ("jwt", "both"),
             "api_key_enabled": AUTH_MODE in ("api_key", "both"),
-        }
+        })
     
     # ==========================================
     # ADMIN API KEY MANAGEMENT

@@ -216,9 +216,11 @@ async def batch_backtest(symbols, timeframe='1h', days_back=30, enable_risk_mana
 
 
 # Wrapper function for API
+
 async def run_backtest(symbol: str, strategy: str = "RSI_MACD", 
                        start_date: str = None, end_date: str = None,
-                       initial_capital: float = 1000, timeframe: str = "1m"):
+                       initial_capital: float = 1000, timeframe: str = "1m",
+                       take_profit_pct: float = 5, stop_loss_pct: float = 2.5):
     """Run backtest - wrapper for API endpoint."""
     engine = BacktestEngine(initial_capital=initial_capital)
     # Calculate days_back from dates if provided
@@ -230,7 +232,7 @@ async def run_backtest(symbol: str, strategy: str = "RSI_MACD",
             days_back = (end - start).days
         except:
             pass
-    return await engine.run_backtest(symbol, timeframe, days_back)
+    return await engine.run_backtest(symbol, timeframe, days_back, take_profit_pct, stop_loss_pct)
 
 
 if __name__ == "__main__":

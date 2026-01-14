@@ -17,6 +17,8 @@ class BacktestRequest(BaseModel):
     end_date: str = None
     initial_capital: float = 1000
     timeframe: str = "1m"
+    take_profit_pct: float = 5
+    stop_loss_pct: float = 2.5
 
 
 class BatchBacktestRequest(BaseModel):
@@ -32,6 +34,9 @@ async def backtest_run(req: BacktestRequest):
     from database_pg import BacktestResult, session_scope
     
     try:
+        # Ambil TP/SL dari request jika ada, fallback ke default
+        take_profit_pct = getattr(req, 'take_profit_pct', 5)
+        stop_loss_pct = getattr(req, 'stop_loss_pct', 2.5)
         result = await backtesting.run_backtest(
             symbol=req.symbol,
             strategy=req.strategy,
@@ -39,21 +44,30 @@ async def backtest_run(req: BacktestRequest):
             end_date=req.end_date,
             initial_capital=req.initial_capital,
             timeframe=req.timeframe,
+            take_profit_pct=take_profit_pct,
+            stop_loss_pct=stop_loss_pct,
         )
         # Save result to PostgreSQL
         with session_scope() as session:
+            # Ensure all numerics are native float/int (not np.float64)
+            def to_float(x):
+                try:
+                    return float(x)
+                except Exception:
+                    return x
+
             backtest = BacktestResult(
-                symbol=result['symbol'],
-                timeframe=result['timeframe'],
-                period_days=result.get('period_days', 30),
-                initial_capital=result['initial_capital'],
-                final_capital=result['final_capital'],
-                roi_pct=result['roi_pct'],
-                total_trades=result['total_trades'],
-                win_rate_pct=result['win_rate_pct'],
-                max_drawdown_pct=result['max_drawdown_pct'],
-                profit_factor=result['profit_factor'],
-                total_fees_paid=result.get('total_fees_paid', 0),
+                symbol=str(result['symbol']),
+                timeframe=str(result['timeframe']),
+                period_days=int(result.get('period_days', 30)),
+                initial_capital=to_float(result['initial_capital']),
+                final_capital=to_float(result['final_capital']),
+                roi_pct=to_float(result['roi_pct']),
+                total_trades=int(result['total_trades']),
+                win_rate_pct=to_float(result['win_rate_pct']),
+                max_drawdown_pct=to_float(result['max_drawdown_pct']),
+                profit_factor=to_float(result['profit_factor']),
+                total_fees_paid=to_float(result.get('total_fees_paid', 0)),
                 result_json=json.dumps(result, default=str)
             )
             session.add(backtest)
