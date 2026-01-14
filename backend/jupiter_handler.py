@@ -5,6 +5,7 @@ import base64
 import json
 import random
 import string
+import time
 from typing import Optional
 from aiohttp.resolver import DefaultResolver
 from dotenv import load_dotenv
@@ -188,10 +189,21 @@ class JupiterManager:
                     if output_token == "BONK": out_decimals = 5
                     
                     out_raw = int(quote_data['outAmount'])
+                    in_raw = int(quote_data.get('inAmount', amount_lamport))
+                    
+                    # Calculate effective price (output per input)
+                    out_amount = out_raw / (10 ** out_decimals)
+                    in_amount = in_raw / (10 ** input_decimals)
+                    effective_price = out_amount / in_amount if in_amount > 0 else 0
+                    
                     return {
                         "status": "success", 
-                        "output_estimate": f"{(out_raw/(10**out_decimals)):,.6f}", 
-                        "raw_data": quote_data # Return data bersih
+                        "output_estimate": f"{out_amount:,.6f}",
+                        "quote_timestamp": time.time(),  # For freshness check
+                        "effective_price": effective_price,  # Output per input
+                        "input_amount": in_amount,
+                        "output_amount": out_amount,
+                        "raw_data": quote_data  # Return data bersih
                     }
         except Exception as e:
             return {"error": str(e)}

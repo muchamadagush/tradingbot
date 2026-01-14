@@ -284,17 +284,40 @@ class SolanaAutoBot:
         trade_amount = self.calculate_position_size(sol_balance)
         sys_logger.add_log(f"💰 Position size: {trade_amount:.4f} SOL ({POSITION_SIZE_PCT*100}% of {sol_balance:.4f})")
 
-        # ---- JUPITER QUOTE ----
-        quote = await jupiter_bot.get_quote(
-            "SOL",
-            self.target_address,
-            trade_amount,
-            slippage_bps=500
-        )
+        # ---- JUPITER QUOTE WITH FRESHNESS VALIDATION ----
+        QUOTE_MAX_AGE_SECONDS = 5  # Quote expires after 5 seconds
+        MAX_PRICE_DEVIATION_PCT = 2.0  # Max 2% price deviation
+        MAX_REQUOTE_ATTEMPTS = 3
+        
+        quote = None
+        for attempt in range(MAX_REQUOTE_ATTEMPTS):
+            quote = await jupiter_bot.get_quote(
+                "SOL",
+                self.target_address,
+                trade_amount,
+                slippage_bps=500
+            )
 
-        if "error" in quote:
-            sys_logger.add_log(f"❌ Quote error: {quote['error']}")
+            if "error" in quote:
+                sys_logger.add_log(f"❌ Quote error: {quote['error']}")
+                return
+            
+            # Validate quote freshness
+            quote_age = time.time() - quote.get("quote_timestamp", 0)
+            if quote_age > QUOTE_MAX_AGE_SECONDS:
+                sys_logger.add_log(f"⚠️ Quote expired ({quote_age:.1f}s > {QUOTE_MAX_AGE_SECONDS}s), re-quoting... ({attempt+1}/{MAX_REQUOTE_ATTEMPTS})")
+                await asyncio.sleep(0.5)  # Brief pause before retry
+                continue
+            
+            # Quote is fresh, proceed
+            break
+        else:
+            sys_logger.add_log(f"❌ Failed to get fresh quote after {MAX_REQUOTE_ATTEMPTS} attempts")
             return
+        
+        # Log quote details
+        effective_price = quote.get("effective_price", 0)
+        sys_logger.add_log(f"📊 Quote: {trade_amount:.4f} SOL → {quote['output_estimate']} {self.target_token} (price: {effective_price:.6f})")
 
         # ---- EXECUTE BUY ----
         res = await jupiter_bot.execute_swap(quote["raw_data"])
