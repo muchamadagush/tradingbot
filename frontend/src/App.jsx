@@ -14,7 +14,17 @@ import { authService, configureAxiosAuth } from './services/authService'
 configureAxiosAuth(axios)
 
 const VITE_API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
-const VITE_WS_URL = import.meta.env.VITE_WS_URL || VITE_API_URL.replace('http', 'ws') + '/ws'
+// Always use VITE_WS_URL if set, otherwise construct from VITE_API_URL
+const getWsUrl = () => {
+  let base = VITE_API_URL.replace(/\/$/, '')
+  base = base.replace(/\/api.*/, '')
+  let wsProto = base.startsWith('https') ? 'wss' : 'ws'
+  let host = base.replace(/^https?:\/\//, '')
+  return `${wsProto}://${host}/ws`
+}
+const VITE_WS_URL = typeof import.meta.env.VITE_WS_URL !== 'undefined' && import.meta.env.VITE_WS_URL
+  ? import.meta.env.VITE_WS_URL
+  : getWsUrl()
 
 function App() {
   const [serverStatus, setServerStatus] = useState("Checking...")
