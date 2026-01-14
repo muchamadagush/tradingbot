@@ -28,7 +28,7 @@ from database_pg import (
     get_db_session, Trade, TradeState, TradeLedger,
     session_scope, get_account_balance, update_account_balance
 )
-from risk_manager import RiskManager, RiskLimits, BotRiskRegistry, BotType
+from risk_manager import BotRiskRegistry
 from jupiter_handler import jupiter_bot
 from solana_auto import solana_auto
 from global_kill_switch import kill_switch
@@ -55,21 +55,10 @@ BOT_MODE = os.getenv("BOT_MODE", "PAPER").upper()
 PAPER_INITIAL_BALANCE = float(os.getenv("PAPER_INITIAL_BALANCE", "1000"))
 
 # ==========================================
-# RISK MANAGERS (PER-BOT)
+# RISK MANAGERS (PER-BOT ONLY)
 # ==========================================
 
-# Legacy global risk manager (for backward compatibility)
-risk_limits = RiskLimits(
-    max_position_size_pct=float(os.getenv("MAX_POSITION_SIZE_PCT", "20")),
-    max_portfolio_drawdown_pct=float(os.getenv("MAX_PORTFOLIO_DRAWDOWN_PCT", "15")),
-    max_daily_loss_pct=float(os.getenv("MAX_DAILY_LOSS_PCT", "5")),
-    max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS", "5")),
-    risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "2")),
-)
-
-risk_manager = RiskManager(PAPER_INITIAL_BALANCE, risk_limits)
-
-# NEW: Per-bot risk registry with bot-specific profiles
+# Per-bot risk registry with bot-specific profiles and persistence
 bot_risk = BotRiskRegistry(PAPER_INITIAL_BALANCE)
 hunter_risk = bot_risk.hunter()   # For Tokocrypto Hunter
 trader_risk = bot_risk.trader()   # For Solana Trader
@@ -444,7 +433,7 @@ async def auto_trading_loop():
             # SCAN NEW TRADE
             # ======================
             else:
-                if not risk_manager.can_trade_new():
+                if not hunter_risk.can_trade_new():
                     CURRENT_SCAN_TARGET = "Risk Limit Hit"
                     await asyncio.sleep(30)
                     continue
@@ -760,7 +749,7 @@ async def paper_buy(req: PaperBuyRequest):
     # Check risk before buy
     open_positions = len(paper_trading.paper_account.positions)
     wallet_balance = paper_trading.paper_account.balance
-    risk_check = risk_manager.can_open_position(open_positions, wallet_balance, req.amount_usdt)
+    risk_check = hunter_risk.can_open_position(open_positions, wallet_balance, req.amount_usdt)
     
     if not risk_check.get("approved", False):
         return {"status": "rejected", "reasons": risk_check.get("reasons", ["Risk check failed"])}
@@ -884,14 +873,14 @@ class PositionSizeRequest(BaseModel):
 @app.post("/api/risk/position-size")
 async def risk_position_size(req: PositionSizeRequest):
     """Calculate optimal position size based on risk."""
-    portfolio = req.portfolio_value or risk_manager.current_equity
-    size = risk_manager.calculate_position_size(
+    portfolio = req.portfolio_value or hunter_risk.current_balance
+    size = hunter_risk.calculate_position_size(
         portfolio, req.entry_price, req.stop_loss_price
     )
     return {
         "position_size": size,
         "portfolio_value": portfolio,
-        "risk_per_trade_pct": risk_manager.limits.risk_per_trade_pct,
+        "risk_per_trade_pct": hunter_risk.limits.risk_per_trade_pct,
     }
 
 
@@ -907,11 +896,12 @@ async def risk_summary():
             except:
                 pass
         summary = paper_trading.paper_account.get_account_summary(prices)
-        current_equity = summary.get("total_equity", risk_manager.current_equity)
+        current_equity = summary.get("total_equity", hunter_risk.current_balance)
     except:
-        current_equity = risk_manager.current_equity
+        current_equity = hunter_risk.current_balance
     
-    return risk_manager.get_risk_summary(current_equity)
+    open_positions = len(paper_trading.paper_account.positions) if paper_trading.paper_account else 0
+    return hunter_risk.get_risk_summary(current_equity, open_positions)
 
 
 @app.get("/api/risk/kelly")

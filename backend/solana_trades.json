@@ -1,1 +1,15 @@
-[]
+[
+    {
+        "id": "SOL-1768311357",
+        "timestamp": "2026-01-13T20:35:57.491343",
+        "symbol": "SPX/SOL",
+        "side": "SELL",
+        "price": 0,
+        "amount_in": 20009.3338,
+        "amount_out": 0.0,
+        "token_address": "J3RHM57QyraT1Mq4vT49ev2GgVzmtHMiEZJ1FPdRocc",
+        "txid": "SELL",
+        "status": "hard SL hit (-100.00%)",
+        "source": "Jupiter"
+    }
+]
