@@ -31,6 +31,10 @@ DEFAULT_SOL_BALANCE = 1.0  # Fallback if balance fetch fails
 MIN_TRADE_SOL = 0.01       # Minimum trade size
 MAX_TRADE_SOL = 0.1        # Maximum trade size (safety cap)
 
+# Trailing Stop Config
+TRAILING_STOP_ACTIVATION_PCT = 10.0  # Activate after 10% profit
+TRAILING_STOP_DISTANCE_PCT = 5.0     # Trail 5% behind high water mark
+
 
 # =============================
 # SOLANA AUTO BOT
@@ -52,6 +56,10 @@ class SolanaAutoBot:
         
         # Track SOL balance for percentage-based sizing
         self.cached_sol_balance = DEFAULT_SOL_BALANCE
+        
+        # NEW: Trailing stop state per token
+        # {token: {"high_water_mark": float, "trailing_active": bool}}
+        self.trailing_stop_state: Dict[str, Dict] = {}
         
         # NEW: Per-bot risk manager for Trader
         self.risk_manager = RiskManager(
@@ -356,11 +364,49 @@ class SolanaAutoBot:
         pnl_pct = ((current_sol - entry) / entry) * 100
 
         pos["pnl_pct"] = pnl_pct
-
+        
+        # ========== TRAILING STOP LOGIC ==========
+        trailing_exit = False
+        trailing_reason = ""
+        
+        # Initialize trailing state for this token
+        if token not in self.trailing_stop_state:
+            self.trailing_stop_state[token] = {
+                "high_water_mark": current_sol,
+                "trailing_active": False
+            }
+        
+        ts_state = self.trailing_stop_state[token]
+        
+        # Update high water mark
+        if current_sol > ts_state["high_water_mark"]:
+            ts_state["high_water_mark"] = current_sol
+        
+        # Activate trailing stop when profit reaches threshold
+        if pnl_pct >= TRAILING_STOP_ACTIVATION_PCT and not ts_state["trailing_active"]:
+            ts_state["trailing_active"] = True
+            sys_logger.add_log(f"🎯 {token}: Trailing stop activated at {pnl_pct:.1f}%")
+        
+        # Check if trailing stop hit
+        if ts_state["trailing_active"]:
+            hwm = ts_state["high_water_mark"]
+            trailing_stop_price = hwm * (1 - TRAILING_STOP_DISTANCE_PCT / 100)
+            
+            if current_sol <= trailing_stop_price:
+                trailing_exit = True
+                hwm_pnl = ((hwm - entry) / entry) * 100
+                trailing_reason = f"TRAILING_STOP (peak {hwm_pnl:.1f}%, now {pnl_pct:.1f}%)"
+        
+        # ========== STRATEGY-BASED EXIT ==========
         should_sell, reason = self.trader_strategy.should_sell(
             pos,
             market={}
         )
+        
+        # Use trailing stop exit if triggered, otherwise use strategy exit
+        if trailing_exit:
+            should_sell = True
+            reason = trailing_reason
 
         if not should_sell:
             return
@@ -387,6 +433,10 @@ class SolanaAutoBot:
 
         self.trader_strategy.on_sell(pos)
         self.remove_position(token)
+        
+        # Cleanup trailing stop state
+        if token in self.trailing_stop_state:
+            del self.trailing_stop_state[token]
         
         # Record PnL to risk manager (for cooldown tracking)
         self.risk_manager.record_trade_pnl(pnl_sol)
