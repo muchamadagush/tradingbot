@@ -108,6 +108,12 @@ def populate_indicators(df):
     adx_col = next((c for c in cols if c.startswith('ADX_')), None)
     if adx_col: df['ADX'] = df[adx_col]
     
+    # +DI and -DI for trend direction
+    dmp_col = next((c for c in cols if c.startswith('DMP_')), None)
+    dmn_col = next((c for c in cols if c.startswith('DMN_')), None)
+    if dmp_col: df['PLUS_DI'] = df[dmp_col]
+    if dmn_col: df['MINUS_DI'] = df[dmn_col]
+    
     atr_col = next((c for c in cols if c.startswith('ATR')), None)
     if atr_col: df['ATR'] = df[atr_col]
         
@@ -193,18 +199,39 @@ def decide_strategy(df):
     selected = "UNKNOWN"
     action = "HOLD"
     reason = "Wait"
+    
+    # Get +DI/-DI for trend direction confirmation
+    plus_di = last.get('PLUS_DI', 0)
+    minus_di = last.get('MINUS_DI', 0)
+    trend_direction = "UP" if plus_di > minus_di else "DOWN" if minus_di > plus_di else "NEUTRAL"
 
     # 1. Squeeze: Masih ketat (8%), mencari ledakan
     if bb_width < 0.08: 
         selected = "BREAKOUT"
         action, reason = strategy_breakout()
         
-    # 2. Trend: Batas diturunkan ke 20 agar lebih cepat mendeteksi 'Follow Through' dari Breakout
-    elif adx_value > 20: 
+    # 2. Strong Trend: ADX > 35 = strong trending market
+    elif adx_value > 35:
+        selected = "STRONG_TREND"
+        action, reason = strategy_trend()
+        # Only follow trend direction
+        if action == "BUY" and trend_direction == "DOWN":
+            action = "HOLD"
+            reason += " (Blocked: -DI > +DI)"
+        elif action == "SELL" and trend_direction == "UP":
+            action = "HOLD"
+            reason += " (Blocked: +DI > -DI)"
+        
+    # 3. Moderate Trend: ADX 25-35 with DI confirmation
+    elif adx_value > 25:
         selected = "TREND_FOLLOWING"
         action, reason = strategy_trend()
+        # Require DI confirmation for moderate trends
+        if action == "BUY" and trend_direction != "UP":
+            action = "HOLD"
+            reason += " (No +DI confirmation)"
         
-    # 3. Sideways: Mode default
+    # 4. Sideways: ADX <= 25, mode default (mean reversion)
     else: 
         selected = "MEAN_REVERSION"
         action, reason = strategy_sideways()
