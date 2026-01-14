@@ -334,183 +334,193 @@ async def auto_trading_loop():
     SL = 0.02   # 2% stop loss (ratio 1.25:1, need ~44.44% win rate)
     TRADE_USDT = 12.0
 
-    while IS_BOT_RUNNING:
-        # ========== KILL SWITCH CHECK ==========
-        if not kill_switch.is_trading_allowed():
-            CURRENT_SCAN_TARGET = "⛔ KILL SWITCH ACTIVE"
-            sys_logger.add_log("⛔ Trading blocked by kill switch")
-            await asyncio.sleep(30)  # Check again in 30 seconds
-            continue
-        
-        # ========== HUNTER RISK CHECK ==========
-        if not hunter_risk.can_trade_new():
-            if hunter_risk.is_in_cooldown():
-                remaining = hunter_risk.get_cooldown_remaining()
-                CURRENT_SCAN_TARGET = f"⏸️ Cooldown ({remaining}s)"
-                sys_logger.add_log(f"⏸️ Hunter in cooldown: {remaining}s remaining")
-            else:
-                CURRENT_SCAN_TARGET = "⚠️ Risk limit reached"
-                sys_logger.add_log("⚠️ Hunter trading halted by risk manager")
-            await asyncio.sleep(10)
-            continue
-        
-        active = get_any_active_trade()
-
-        # ======================
-        # MANAGE OPEN POSITION (WITH TRAILING STOP)
-        # ======================
-        if active:
-            symbol = active.symbol
-            trade_id = active.id
-            CURRENT_SCAN_TARGET = f"Managing {symbol}"
-
-            try:
-                ticker = await exchange.fetch_ticker(symbol)
-                price = ticker["last"]
-
-                buy_price = active.buy_price
-                amount = active.amount
-
-                pnl_pct = (price - buy_price) / buy_price
-                
-                # ========== TRAILING STOP LOGIC ==========
-                exit_reason = None
-                should_exit = False
-                
-                # Initialize trailing stop state for this trade (with lock)
-                async with TRAILING_STOP_LOCK:
-                    if trade_id not in TRAILING_STOP_STATE:
-                        TRAILING_STOP_STATE[trade_id] = {
-                            "high_price": price,
-                            "trailing_active": False
-                        }
-                    
-                    ts_state = TRAILING_STOP_STATE[trade_id]
-                    
-                    # Update high water mark
-                    if price > ts_state["high_price"]:
-                        ts_state["high_price"] = price
-                    
-                    # Activate trailing stop when profit reaches threshold
-                    if pnl_pct >= TRAILING_STOP_ACTIVATION_PCT:
-                        ts_state["trailing_active"] = True
-                        trailing_stop_price = ts_state["high_price"] * (1 - TRAILING_STOP_DISTANCE_PCT)
-                        
-                        # Check if trailing stop hit
-                        if price <= trailing_stop_price:
-                            should_exit = True
-                            exit_reason = "TRAILING_STOP"
-                
-                # Regular TP/SL still applies
-                if pnl_pct >= TP:
-                    should_exit = True
-                    exit_reason = "TP_HIT"
-                elif pnl_pct <= -SL:
-                    should_exit = True
-                    exit_reason = "SL_HIT"
-                
-                # Execute exit if needed
-                if should_exit and exit_reason:
-                    profit = (price - buy_price) * amount
-
-                    if BOT_MODE == "LIVE":
-                        # P3: Use safe execution with retry
-                        result = await execution.safe_execute_order(
-                            exchange, symbol, "sell", amount * price,
-                            max_slippage_pct=1.0, check_liquidity_first=True
-                        )
-                        if not result["success"]:
-                            sys_logger.add_log(f"⚠️ Sell failed: {result.get('error')}")
-                            continue
-
-                    save_sell_trade(active.id, price, profit, reason=exit_reason)
-                    hunter_risk.record_trade_pnl(profit)
-                    
-                    # Cleanup trailing stop state (with lock)
-                    async with TRAILING_STOP_LOCK:
-                        if trade_id in TRAILING_STOP_STATE:
-                            del TRAILING_STOP_STATE[trade_id]
-                    
-                    sys_logger.add_log(f"📊 Trade closed: {symbol} | {exit_reason} | PnL: ${profit:.2f}")
-
-                await asyncio.sleep(2)
-
-            except Exception as e:
-                error_type = execution.classify_error(e)
-                print(f"[MANAGE ERROR] {error_type}: {e}")
-
-        # ======================
-        # SCAN NEW TRADE
-        # ======================
-        else:
-            if not risk_manager.can_trade_new():
-                CURRENT_SCAN_TARGET = "Risk Limit Hit"
-                await asyncio.sleep(30)
+    try:
+        while IS_BOT_RUNNING:
+            # ========== KILL SWITCH CHECK ==========
+            if not kill_switch.is_trading_allowed():
+                CURRENT_SCAN_TARGET = "⛔ KILL SWITCH ACTIVE"
+                sys_logger.add_log("⛔ Trading blocked by kill switch")
+                await asyncio.sleep(30)  # Check again in 30 seconds
                 continue
+            
+            # ========== HUNTER RISK CHECK ==========
+            if not hunter_risk.can_trade_new():
+                if hunter_risk.is_in_cooldown():
+                    remaining = hunter_risk.get_cooldown_remaining()
+                    CURRENT_SCAN_TARGET = f"⏸️ Cooldown ({remaining}s)"
+                    sys_logger.add_log(f"⏸️ Hunter in cooldown: {remaining}s remaining")
+                else:
+                    CURRENT_SCAN_TARGET = "⚠️ Risk limit reached"
+                    sys_logger.add_log("⚠️ Hunter trading halted by risk manager")
+                await asyncio.sleep(10)
+                continue
+            
+            active = get_any_active_trade()
 
-            for symbol in await get_top_liquid_coins():
-                if not IS_BOT_RUNNING:
-                    break
-
-                CURRENT_SCAN_TARGET = f"Scanning {symbol}"
+            # ======================
+            # MANAGE OPEN POSITION (WITH TRAILING STOP)
+            # ======================
+            if active:
+                symbol = active.symbol
+                trade_id = active.id
+                CURRENT_SCAN_TARGET = f"Managing {symbol}"
 
                 try:
-                    # P3: Check spread before analyzing
-                    spread_ok, spread_info = await execution.check_spread(exchange, symbol, max_spread_pct=0.5)
-                    if not spread_ok:
-                        sys_logger.add_log(f"⏭️ Skip {symbol}: high spread {spread_info.get('spread_pct', 0):.2f}%")
-                        continue
-                    
-                    signal, price, indicators = await strategy.analyze_market(exchange, symbol)
-                    
-                    # Log all signals (BUY, SELL, HOLD) for frontend display
-                    if signal == "BUY":
-                        action_msg = "BUY"
-                        reason = indicators.get('reason', 'Signal detected')
-                        strategy_type = indicators.get('strategy', 'UNKNOWN')
-                        htf = indicators.get('htf_signal', 'NEUTRAL')
-                        sys_logger.add_log(f"📊 {symbol} | {strategy_type} | {reason} | HTF:{htf} -> {action_msg}")
-                    elif signal == "SELL":
-                        reason = indicators.get('reason', 'Signal detected')
-                        strategy_type = indicators.get('strategy', 'UNKNOWN')
-                        htf = indicators.get('htf_signal', 'NEUTRAL')
-                        sys_logger.add_log(f"📊 {symbol} | {strategy_type} | {reason} | HTF:{htf} -> SELL")
-                    
-                    if signal != "BUY":
-                        continue
+                    ticker = await exchange.fetch_ticker(symbol)
+                    price = ticker["last"]
 
-                    amount = TRADE_USDT / price
+                    buy_price = active.buy_price
+                    amount = active.amount
+
+                    pnl_pct = (price - buy_price) / buy_price
                     
-                    # P3: Check liquidity before buy
-                    is_liquid, liquidity = await execution.check_liquidity(
-                        exchange, symbol, TRADE_USDT, "buy", max_slippage_pct=0.5
-                    )
-                    if not is_liquid:
-                        sys_logger.add_log(f"⏭️ Skip {symbol}: low liquidity")
-                        continue
+                    # ========== TRAILING STOP LOGIC ==========
+                    exit_reason = None
+                    should_exit = False
+                    
+                    # Initialize trailing stop state for this trade (with lock)
+                    async with TRAILING_STOP_LOCK:
+                        if trade_id not in TRAILING_STOP_STATE:
+                            TRAILING_STOP_STATE[trade_id] = {
+                                "high_price": price,
+                                "trailing_active": False
+                            }
+                        
+                        ts_state = TRAILING_STOP_STATE[trade_id]
+                        
+                        # Update high water mark
+                        if price > ts_state["high_price"]:
+                            ts_state["high_price"] = price
+                        
+                        # Activate trailing stop when profit reaches threshold
+                        if pnl_pct >= TRAILING_STOP_ACTIVATION_PCT:
+                            ts_state["trailing_active"] = True
+                            trailing_stop_price = ts_state["high_price"] * (1 - TRAILING_STOP_DISTANCE_PCT)
+                            
+                            # Check if trailing stop hit
+                            if price <= trailing_stop_price:
+                                should_exit = True
+                                exit_reason = "TRAILING_STOP"
+                    
+                    # Regular TP/SL still applies
+                    if pnl_pct >= TP:
+                        should_exit = True
+                        exit_reason = "TP_HIT"
+                    elif pnl_pct <= -SL:
+                        should_exit = True
+                        exit_reason = "SL_HIT"
+                    
+                    # Execute exit if needed
+                    if should_exit and exit_reason:
+                        profit = (price - buy_price) * amount
 
-                    if BOT_MODE == "LIVE":
-                        # P3: Use safe execution with retry
-                        result = await execution.safe_execute_order(
-                            exchange, symbol, "buy", TRADE_USDT,
-                            max_slippage_pct=0.5, check_liquidity_first=False  # Already checked
-                        )
-                        if not result["success"]:
-                            sys_logger.add_log(f"❌ Buy failed: {result.get('error')}")
-                            continue
+                        if BOT_MODE == "LIVE":
+                            # P3: Use safe execution with retry
+                            result = await execution.safe_execute_order(
+                                exchange, symbol, "sell", amount * price,
+                                max_slippage_pct=1.0, check_liquidity_first=True
+                            )
+                            if not result["success"]:
+                                sys_logger.add_log(f"⚠️ Sell failed: {result.get('error')}")
+                                continue
 
-                    save_buy_trade(symbol, price, amount, TRADE_USDT)
-                    break
+                        save_sell_trade(active.id, price, profit, reason=exit_reason)
+                        hunter_risk.record_trade_pnl(profit)
+                        
+                        # Cleanup trailing stop state (with lock)
+                        async with TRAILING_STOP_LOCK:
+                            if trade_id in TRAILING_STOP_STATE:
+                                del TRAILING_STOP_STATE[trade_id]
+                        
+                        sys_logger.add_log(f"📊 Trade closed: {symbol} | {exit_reason} | PnL: ${profit:.2f}")
+
+                    await asyncio.sleep(2)
 
                 except Exception as e:
                     error_type = execution.classify_error(e)
-                    print(f"[SCAN ERROR] {symbol} {error_type}: {e}")
+                    print(f"[MANAGE ERROR] {error_type}: {e}")
 
-                await asyncio.sleep(1)
+            # ======================
+            # SCAN NEW TRADE
+            # ======================
+            else:
+                if not risk_manager.can_trade_new():
+                    CURRENT_SCAN_TARGET = "Risk Limit Hit"
+                    await asyncio.sleep(30)
+                    continue
 
-        await asyncio.sleep(1)
+                for symbol in await get_top_liquid_coins():
+                    if not IS_BOT_RUNNING:
+                        break
 
-    await exchange.close()
+                    CURRENT_SCAN_TARGET = f"Scanning {symbol}"
+
+                    try:
+                        # P3: Check spread before analyzing
+                        spread_ok, spread_info = await execution.check_spread(exchange, symbol, max_spread_pct=0.5)
+                        if not spread_ok:
+                            sys_logger.add_log(f"⏭️ Skip {symbol}: high spread {spread_info.get('spread_pct', 0):.2f}%")
+                            continue
+                        
+                        signal, price, indicators = await strategy.analyze_market(exchange, symbol)
+                        
+                        # Log all signals (BUY, SELL, HOLD) for frontend display
+                        if signal == "BUY":
+                            action_msg = "BUY"
+                            reason = indicators.get('reason', 'Signal detected')
+                            strategy_type = indicators.get('strategy', 'UNKNOWN')
+                            htf = indicators.get('htf_signal', 'NEUTRAL')
+                            sys_logger.add_log(f"📊 {symbol} | {strategy_type} | {reason} | HTF:{htf} -> {action_msg}")
+                        elif signal == "SELL":
+                            reason = indicators.get('reason', 'Signal detected')
+                            strategy_type = indicators.get('strategy', 'UNKNOWN')
+                            htf = indicators.get('htf_signal', 'NEUTRAL')
+                            sys_logger.add_log(f"📊 {symbol} | {strategy_type} | {reason} | HTF:{htf} -> SELL")
+                        
+                        if signal != "BUY":
+                            continue
+
+                        amount = TRADE_USDT / price
+                        
+                        # P3: Check liquidity before buy
+                        is_liquid, liquidity = await execution.check_liquidity(
+                            exchange, symbol, TRADE_USDT, "buy", max_slippage_pct=0.5
+                        )
+                        if not is_liquid:
+                            sys_logger.add_log(f"⏭️ Skip {symbol}: low liquidity")
+                            continue
+
+                        if BOT_MODE == "LIVE":
+                            # P3: Use safe execution with retry
+                            result = await execution.safe_execute_order(
+                                exchange, symbol, "buy", TRADE_USDT,
+                                max_slippage_pct=0.5, check_liquidity_first=False  # Already checked
+                            )
+                            if not result["success"]:
+                                sys_logger.add_log(f"❌ Buy failed: {result.get('error')}")
+                                continue
+
+                        save_buy_trade(symbol, price, amount, TRADE_USDT)
+                        break
+
+                    except Exception as e:
+                        error_type = execution.classify_error(e)
+                        print(f"[SCAN ERROR] {symbol} {error_type}: {e}")
+
+                    await asyncio.sleep(1)
+
+            await asyncio.sleep(1)
+
+    except Exception as e:
+        sys_logger.add_log(f"💥 Bot loop crashed: {type(e).__name__}: {str(e)[:100]}")
+        raise
+    finally:
+        sys_logger.add_log("🔌 Closing exchange connection...")
+        try:
+            await exchange.close()
+            sys_logger.add_log("✅ Exchange connection closed")
+        except Exception as close_err:
+            sys_logger.add_log(f"⚠️ Error closing exchange: {close_err}")
 
 # ==========================================
 # API ENDPOINTS
