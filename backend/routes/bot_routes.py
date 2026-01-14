@@ -5,7 +5,7 @@ Bot control and trade history endpoints
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from pydantic import BaseModel
-from auth import require_trader, optional_auth, AuthUser
+from auth import require_trader, require_admin, optional_auth, AuthUser
 from rate_limiter import limiter, RATE_LIMIT_TRADING, RATE_LIMIT_READONLY
 
 router = APIRouter(prefix="/api", tags=["bot"])
@@ -173,3 +173,158 @@ async def toko_price(symbol: str):
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+# ==========================================
+# POSITION MANAGEMENT ENDPOINTS
+# ==========================================
+
+class ClosePositionRequest(BaseModel):
+    action: str = "warn"  # "warn", "force_close", "persist"
+
+
+@router.get("/positions/active")
+@limiter.limit(RATE_LIMIT_READONLY)
+async def get_active_positions(request: Request, user: AuthUser = Depends(optional_auth)):
+    """Get all currently active/open positions."""
+    from main import get_all_active_trades, exchange
+    
+    active_trades = get_all_active_trades()
+    
+    if not active_trades:
+        return {"positions": [], "count": 0, "total_value": 0}
+    
+    positions = []
+    total_value = 0
+    total_unrealized_pnl = 0
+    
+    for trade in active_trades:
+        try:
+            ticker = await exchange.fetch_ticker(trade.symbol)
+            current_price = ticker["last"]
+            current_value = trade.amount * current_price
+            unrealized_pnl = (current_price - trade.buy_price) * trade.amount
+            pnl_pct = ((current_price - trade.buy_price) / trade.buy_price) * 100
+        except:
+            current_price = None
+            current_value = trade.total_usdt
+            unrealized_pnl = 0
+            pnl_pct = 0
+        
+        positions.append({
+            "id": trade.id,
+            "symbol": trade.symbol,
+            "entry_price": trade.buy_price,
+            "current_price": current_price,
+            "amount": trade.amount,
+            "entry_value": trade.total_usdt,
+            "current_value": current_value,
+            "unrealized_pnl": unrealized_pnl,
+            "pnl_pct": pnl_pct,
+            "status": trade.status.value if hasattr(trade.status, 'value') else str(trade.status),
+            "created_at": trade.created_at.isoformat() if trade.created_at else None,
+        })
+        total_value += current_value
+        total_unrealized_pnl += unrealized_pnl
+    
+    return {
+        "positions": positions,
+        "count": len(positions),
+        "total_value": total_value,
+        "total_unrealized_pnl": total_unrealized_pnl,
+    }
+
+
+@router.post("/positions/close-all")
+@limiter.limit(RATE_LIMIT_TRADING)
+async def close_all_positions(request: Request, req: ClosePositionRequest, user: AuthUser = Depends(require_admin)):
+    """
+    Close all open positions. Admin only.
+    
+    Actions:
+    - "warn": Log warnings only (dry run)
+    - "force_close": Force close all at market price
+    - "persist": Mark for resume on restart
+    """
+    from main import cleanup_open_positions
+    
+    result = await cleanup_open_positions(action=req.action)
+    return {
+        "action": req.action,
+        "result": result,
+        "closed_by": user.user_id,
+    }
+
+
+@router.post("/positions/emergency-close")
+@limiter.limit(RATE_LIMIT_TRADING)
+async def emergency_close(request: Request, user: AuthUser = Depends(require_admin)):
+    """Emergency close all positions immediately. Admin only."""
+    from main import emergency_close_all_positions
+    
+    result = await emergency_close_all_positions()
+    return {
+        "action": "emergency_close",
+        "result": result,
+        "triggered_by": user.user_id,
+    }
+
+
+@router.post("/positions/{trade_id}/close")
+@limiter.limit(RATE_LIMIT_TRADING)
+async def close_single_position(request: Request, trade_id: int, user: AuthUser = Depends(require_trader)):
+    """Manually close a specific position. Requires trader role."""
+    from main import exchange, save_sell_trade, hunter_risk, BOT_MODE
+    from database_pg import get_db_session, Trade, TradeState
+    import execution
+    
+    session = get_db_session()
+    try:
+        trade = session.query(Trade).filter(
+            Trade.id == trade_id,
+            Trade.status.in_([TradeState.OPEN, TradeState.CLOSING])
+        ).first()
+        
+        if not trade:
+            return {"error": "Trade not found or already closed", "trade_id": trade_id}
+        
+        symbol = trade.symbol
+        buy_price = trade.buy_price
+        amount = trade.amount
+    finally:
+        session.close()
+    
+    try:
+        ticker = await exchange.fetch_ticker(symbol)
+        current_price = ticker["last"]
+    except Exception as e:
+        return {"error": f"Failed to fetch price: {e}", "trade_id": trade_id}
+    
+    profit = (current_price - buy_price) * amount
+    pnl_pct = ((current_price - buy_price) / buy_price) * 100
+    
+    # Execute sell if in LIVE mode
+    if BOT_MODE == "LIVE":
+        sell_result = await execution.safe_execute_order(
+            exchange, symbol, "sell", amount * current_price,
+            max_slippage_pct=1.0,
+            check_liquidity_first=False
+        )
+        if not sell_result["success"]:
+            return {"error": f"Sell failed: {sell_result.get('error')}", "trade_id": trade_id}
+    
+    # Update database
+    save_sell_trade(trade_id, current_price, profit, reason="MANUAL_CLOSE")
+    hunter_risk.record_trade_pnl(profit)
+    
+    return {
+        "status": "closed",
+        "trade_id": trade_id,
+        "symbol": symbol,
+        "entry_price": buy_price,
+        "exit_price": current_price,
+        "amount": amount,
+        "profit": profit,
+        "pnl_pct": pnl_pct,
+        "closed_by": user.user_id,
+    }

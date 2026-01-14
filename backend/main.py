@@ -314,6 +314,142 @@ def get_any_active_trade():
     finally:
         session.close()
 
+
+def get_all_active_trades():
+    """Get all trades in OPEN or CLOSING state."""
+    session = get_db_session()
+    try:
+        trades = session.query(Trade).filter(
+            Trade.status.in_([TradeState.OPEN, TradeState.CLOSING])
+        ).all()
+        return trades
+    finally:
+        session.close()
+
+
+# ==========================================
+# POSITION CLEANUP ON BOT STOP
+# ==========================================
+
+# Configuration for position handling on stop
+# Options: "warn", "force_close", "persist"
+# - "warn": Log warning about open positions (default)
+# - "force_close": Close all positions at market price
+# - "persist": Keep positions in DB for resume on restart
+BOT_STOP_POSITION_ACTION = os.getenv("BOT_STOP_POSITION_ACTION", "warn").lower()
+
+
+async def cleanup_open_positions(action: str = None, force_price: dict = None):
+    """
+    Handle open positions when bot stops.
+    
+    Args:
+        action: Override action ("warn", "force_close", "persist")
+        force_price: Dict of {symbol: price} for force closing without fetching
+    
+    Returns:
+        dict with cleanup results
+    """
+    action = action or BOT_STOP_POSITION_ACTION
+    active_trades = get_all_active_trades()
+    
+    if not active_trades:
+        sys_logger.add_log("✅ No open positions to handle")
+        return {"status": "clean", "positions": 0}
+    
+    result = {
+        "status": "processed",
+        "action": action,
+        "positions": len(active_trades),
+        "details": []
+    }
+    
+    sys_logger.add_log(f"⚠️ Found {len(active_trades)} open position(s) on bot stop")
+    
+    for trade in active_trades:
+        trade_info = {
+            "id": trade.id,
+            "symbol": trade.symbol,
+            "buy_price": trade.buy_price,
+            "amount": trade.amount,
+            "status": trade.status.value if hasattr(trade.status, 'value') else str(trade.status),
+        }
+        
+        if action == "warn":
+            # Just log warning, don't touch positions
+            sys_logger.add_log(f"⚠️ ORPHANED POSITION: {trade.symbol} | Amount: {trade.amount:.6f} | Entry: ${trade.buy_price:.4f}")
+            trade_info["action"] = "warned"
+            
+        elif action == "force_close":
+            # Force close at market price
+            try:
+                if force_price and trade.symbol in force_price:
+                    current_price = force_price[trade.symbol]
+                else:
+                    ticker = await exchange.fetch_ticker(trade.symbol)
+                    current_price = ticker["last"]
+                
+                profit = (current_price - trade.buy_price) * trade.amount
+                pnl_pct = ((current_price - trade.buy_price) / trade.buy_price) * 100
+                
+                # Execute sell if in LIVE mode
+                if BOT_MODE == "LIVE":
+                    sell_result = await execution.safe_execute_order(
+                        exchange, trade.symbol, "sell", trade.amount * current_price,
+                        max_slippage_pct=2.0,  # Higher tolerance for emergency close
+                        check_liquidity_first=False
+                    )
+                    if not sell_result["success"]:
+                        sys_logger.add_log(f"❌ Force close failed for {trade.symbol}: {sell_result.get('error')}")
+                        trade_info["action"] = "failed"
+                        trade_info["error"] = sell_result.get("error")
+                        result["details"].append(trade_info)
+                        continue
+                
+                # Update database
+                save_sell_trade(trade.id, current_price, profit, reason="BOT_STOP_FORCE_CLOSE")
+                hunter_risk.record_trade_pnl(profit)
+                
+                sys_logger.add_log(f"🔴 FORCE CLOSED: {trade.symbol} | Price: ${current_price:.4f} | PnL: ${profit:.2f} ({pnl_pct:+.2f}%)")
+                trade_info["action"] = "force_closed"
+                trade_info["exit_price"] = current_price
+                trade_info["profit"] = profit
+                trade_info["pnl_pct"] = pnl_pct
+                
+            except Exception as e:
+                sys_logger.add_log(f"❌ Error force closing {trade.symbol}: {e}")
+                trade_info["action"] = "error"
+                trade_info["error"] = str(e)
+                
+        elif action == "persist":
+            # Mark as persisted (will resume on restart)
+            sys_logger.add_log(f"💾 PERSISTED: {trade.symbol} | Will resume management on restart")
+            trade_info["action"] = "persisted"
+            # Position remains in OPEN state in DB
+            
+        result["details"].append(trade_info)
+    
+    # Summary log
+    if action == "warn":
+        sys_logger.add_log(f"⚠️ WARNING: {len(active_trades)} position(s) left unmanaged! Manual intervention may be required.")
+    elif action == "force_close":
+        closed = sum(1 for d in result["details"] if d.get("action") == "force_closed")
+        sys_logger.add_log(f"🔴 Force closed {closed}/{len(active_trades)} positions")
+    elif action == "persist":
+        sys_logger.add_log(f"💾 {len(active_trades)} position(s) persisted for resume on restart")
+    
+    return result
+
+
+async def emergency_close_all_positions():
+    """
+    Emergency function to close all open positions immediately.
+    Called via API endpoint for manual intervention.
+    """
+    sys_logger.add_log("🚨 EMERGENCY CLOSE ALL triggered")
+    return await cleanup_open_positions(action="force_close")
+
+
 def save_buy_trade(symbol, price, amount, usdt, bot_type="HUNTER"):
     """
     Create and immediately open a trade using atomic lifecycle.
@@ -710,6 +846,16 @@ async def auto_trading_loop():
         sys_logger.add_log(f"💥 Bot loop crashed: {type(e).__name__}: {str(e)[:100]}")
         raise
     finally:
+        # ========== HANDLE OPEN POSITIONS ==========
+        sys_logger.add_log("🛑 Bot stopping - checking open positions...")
+        try:
+            cleanup_result = await cleanup_open_positions()
+            if cleanup_result["positions"] > 0:
+                sys_logger.add_log(f"📋 Position cleanup: {cleanup_result['action']} - {cleanup_result['positions']} position(s)")
+        except Exception as cleanup_err:
+            sys_logger.add_log(f"⚠️ Error during position cleanup: {cleanup_err}")
+        
+        # ========== CLOSE EXCHANGE CONNECTION ==========
         sys_logger.add_log("🔌 Closing exchange connection...")
         try:
             await exchange.close()
