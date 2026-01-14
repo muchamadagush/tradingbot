@@ -22,9 +22,13 @@ class SolanaTraderStrategy(BaseStrategy):
     COOLDOWN_SECONDS = 15 * 60
     MAX_HOLD_SECONDS = 20 * 60
 
-    HARD_SL_PCT = -12.0
-    TP1_PCT = 20.0
-    TP2_PCT = 30.0
+    # Risk-adjusted TP/SL (max 3 positions = 24% max portfolio loss)
+    HARD_SL_PCT = -8.0       # Reduced from -12% to limit losses
+    TP1_PCT = 15.0           # Reduced from 20% (ratio 1.875:1)
+    TP2_PCT = 25.0           # Reduced from 30%
+    
+    # Dynamic SL based on ATR
+    ATR_SL_MULTIPLIER = 2.0  # SL = entry - (ATR * multiplier)
 
     def __init__(self):
         self.last_entry_ts = {}
@@ -113,9 +117,15 @@ class SolanaTraderStrategy(BaseStrategy):
     def should_sell(self, position, market) -> (bool, str):
 
         pnl = position.get("pnl_pct", 0.0)
+        
+        # ---- DYNAMIC ATR-BASED SL ----
+        dynamic_sl_pct = position.get("dynamic_sl_pct", self.HARD_SL_PCT)
+        
+        # Use the tighter of hard SL or dynamic SL
+        effective_sl = max(dynamic_sl_pct, self.HARD_SL_PCT)  # Both negative, max = less negative = tighter
 
-        if pnl <= self.HARD_SL_PCT:
-            return True, f"hard SL hit ({pnl:.2f}%)"
+        if pnl <= effective_sl:
+            return True, f"SL hit ({pnl:.2f}% <= {effective_sl:.2f}%)"
 
         if pnl >= self.TP1_PCT and not position.get("tp1_hit", False):
             position["tp1_hit"] = True
@@ -134,6 +144,71 @@ class SolanaTraderStrategy(BaseStrategy):
         token = position.get("token", "BACKTEST")
         self.last_entry_ts[token] = time.time()
         position["tp1_hit"] = False
+        
+        # Calculate dynamic SL based on ATR at entry
+        atr = position.get("atr", 0)
+        entry_price = position.get("entry_price", 0)
+        
+        if atr > 0 and entry_price > 0:
+            # SL distance = ATR * multiplier
+            sl_distance = atr * self.ATR_SL_MULTIPLIER
+            dynamic_sl_pct = -(sl_distance / entry_price) * 100
+            # Clamp to hard SL (don't allow wider than hard SL)
+            position["dynamic_sl_pct"] = max(dynamic_sl_pct, self.HARD_SL_PCT)
+        else:
+            position["dynamic_sl_pct"] = self.HARD_SL_PCT
 
     def on_sell(self, position):
         pass
+
+    # ==================================================
+    # RISK-ADJUSTED POSITION SIZING
+    # ==================================================
+
+    def calculate_position_size(
+        self, 
+        capital: float, 
+        entry_price: float, 
+        atr: float,
+        risk_pct: float = 2.0  # Default from RISK_PER_TRADE_PCT
+    ) -> dict:
+        """
+        Calculate position size based on ATR and risk per trade.
+        
+        Args:
+            capital: Available capital in USD
+            entry_price: Entry price per unit
+            atr: Current ATR value
+            risk_pct: % of capital to risk per trade (from env/risk_manager)
+            
+        Returns:
+            dict with position_size, sl_price, risk_amount
+        """
+        if atr <= 0 or entry_price <= 0 or capital <= 0:
+            return {"error": "Invalid inputs", "position_size": 0}
+        
+        # Risk amount in USD
+        risk_amount = capital * (risk_pct / 100.0)
+        
+        # SL distance based on ATR
+        sl_distance = atr * self.ATR_SL_MULTIPLIER
+        sl_price = entry_price - sl_distance
+        
+        # Position size = risk_amount / sl_distance
+        position_size = risk_amount / sl_distance
+        position_value = position_size * entry_price
+        
+        # Cap position size to 20% of capital
+        max_position_value = capital * 0.20
+        if position_value > max_position_value:
+            position_size = max_position_value / entry_price
+            position_value = max_position_value
+        
+        return {
+            "position_size": position_size,
+            "position_value_usd": position_value,
+            "sl_price": sl_price,
+            "sl_pct": -(sl_distance / entry_price) * 100,
+            "risk_amount": risk_amount,
+            "risk_pct": risk_pct,
+        }
