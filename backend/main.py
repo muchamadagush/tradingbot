@@ -10,6 +10,14 @@ from fastapi import FastAPI, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# NumPy for type conversion (optional but recommended)
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    np = None
+    HAS_NUMPY = False
+
 # Load environment early so DATABASE_URL is available for database imports
 load_dotenv()
 
@@ -314,10 +322,10 @@ def save_buy_trade(symbol, price, amount, usdt, bot_type="HUNTER"):
     Converts numpy types to Python native types for PostgreSQL compatibility.
     """
     # Convert numpy types to Python native types (np.float64 -> float)
-    import numpy as np
-    price = float(price) if isinstance(price, (np.floating, np.integer)) else price
-    amount = float(amount) if isinstance(amount, (np.floating, np.integer)) else amount
-    usdt = float(usdt) if isinstance(usdt, (np.floating, np.integer)) else usdt
+    if HAS_NUMPY:
+        price = float(price) if isinstance(price, (np.floating, np.integer)) else price
+        amount = float(amount) if isinstance(amount, (np.floating, np.integer)) else amount
+        usdt = float(usdt) if isinstance(usdt, (np.floating, np.integer)) else usdt
     
     with session_scope() as session:
         # Create trade in PENDING state
@@ -388,9 +396,9 @@ def save_sell_trade(trade_id, sell_price, profit, reason="TP_HIT"):
     Converts numpy types to Python native types for PostgreSQL compatibility.
     """
     # Convert numpy types to Python native types
-    import numpy as np
-    sell_price = float(sell_price) if isinstance(sell_price, (np.floating, np.integer)) else sell_price
-    profit = float(profit) if isinstance(profit, (np.floating, np.integer)) else profit
+    if HAS_NUMPY:
+        sell_price = float(sell_price) if isinstance(sell_price, (np.floating, np.integer)) else sell_price
+        profit = float(profit) if isinstance(profit, (np.floating, np.integer)) else profit
     
     with session_scope() as session:
         trade = session.query(Trade).filter_by(id=trade_id).first()
