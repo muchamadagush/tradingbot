@@ -926,7 +926,9 @@ async def risk_summary():
 
 @app.get("/api/risk/kelly")
 async def risk_kelly():
-    """Calculate Kelly criterion position size."""
+    """Calculate Kelly criterion position size (Half-Kelly for safety)."""
+    MIN_SAMPLE_SIZE = 30  # Industry standard minimum
+    
     # Get historical win rate from trades
     session = get_db_session()
     try:
@@ -936,7 +938,12 @@ async def risk_kelly():
         session.close()
     
     if not trades:
-        return {"kelly_pct": 0, "message": "No trade history"}
+        return {"kelly_pct": 0, "half_kelly_pct": 0, "message": "No trade history", "warning": "Insufficient data"}
+    
+    # Sample size warning
+    sample_warning = None
+    if len(trades) < MIN_SAMPLE_SIZE:
+        sample_warning = f"Low sample size ({len(trades)}/{MIN_SAMPLE_SIZE}). Results may be unreliable."
     
     wins = sum(1 for t in trades if t.get("profit_usdt", 0) > 0)
     win_rate = wins / len(trades) if trades else 0.5
@@ -951,15 +958,27 @@ async def risk_kelly():
     win_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 1
     
     # Kelly formula: K% = W - [(1-W)/R]
-    kelly = win_rate - ((1 - win_rate) / win_loss_ratio) if win_loss_ratio > 0 else 0
-    kelly = max(0, min(kelly, 0.25))  # Cap at 25%
+    full_kelly = win_rate - ((1 - win_rate) / win_loss_ratio) if win_loss_ratio > 0 else 0
+    full_kelly = max(0, full_kelly)
     
-    return {
-        "kelly_pct": round(kelly * 100, 2),
+    # Half-Kelly: Industry standard for reduced volatility
+    half_kelly = full_kelly / 2
+    half_kelly = min(half_kelly, 0.10)  # Cap at 10% (conservative)
+    
+    result = {
+        "kelly_pct": round(full_kelly * 100, 2),
+        "half_kelly_pct": round(half_kelly * 100, 2),
+        "recommended_pct": round(half_kelly * 100, 2),  # Use Half-Kelly
         "win_rate": round(win_rate * 100, 2),
         "win_loss_ratio": round(win_loss_ratio, 2),
         "trades_analyzed": len(trades),
+        "min_sample_size": MIN_SAMPLE_SIZE,
     }
+    
+    if sample_warning:
+        result["warning"] = sample_warning
+    
+    return result
 
 
 # ==========================================

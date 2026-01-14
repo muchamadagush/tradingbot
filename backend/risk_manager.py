@@ -370,10 +370,13 @@ class RiskManager:
     # POSITION SIZING & KELLY
     # ======================================
 
-    def calculate_kelly_criterion(self, win_rate, avg_win, avg_loss) -> Dict:
+    def calculate_kelly_criterion(self, win_rate, avg_win, avg_loss, sample_size: int = 0) -> Dict:
         """
         Kelly Criterion calculator for frontend.
+        Returns Half-Kelly (industry standard) for reduced volatility.
         """
+        MIN_SAMPLE_SIZE = 30
+        
         try:
             win_rate = float(win_rate) / 100.0
             avg_win = float(avg_win)
@@ -388,14 +391,29 @@ class RiskManager:
         p = max(0.0, min(1.0, win_rate))
         q = 1 - p
 
-        kelly_fraction = max(0.0, (b * p - q) / b)
-        kelly_pct = kelly_fraction * 100
+        # Full Kelly
+        full_kelly = max(0.0, (b * p - q) / b)
+        
+        # Half-Kelly: Industry standard for reduced volatility
+        half_kelly = full_kelly / 2
+        half_kelly = min(half_kelly, 0.10)  # Cap at 10%
+        
+        half_kelly_pct = half_kelly * 100
+        full_kelly_pct = full_kelly * 100
 
-        return {
+        result = {
             "status": "success",
-            "kelly_pct": kelly_pct,
-            "recommendation": f"Risk up to {kelly_pct:.2f}% of capital per trade",
+            "kelly_pct": full_kelly_pct,
+            "half_kelly_pct": half_kelly_pct,
+            "recommended_pct": half_kelly_pct,
+            "recommendation": f"Risk up to {half_kelly_pct:.2f}% of capital per trade (Half-Kelly)",
         }
+        
+        # Sample size warning
+        if sample_size > 0 and sample_size < MIN_SAMPLE_SIZE:
+            result["warning"] = f"Low sample size ({sample_size}/{MIN_SAMPLE_SIZE}). Results may be unreliable."
+        
+        return result
 
     def calculate_position_size(
         self,
