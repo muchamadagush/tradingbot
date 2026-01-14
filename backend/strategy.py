@@ -155,11 +155,21 @@ def decide_strategy(df):
         return "HOLD", "No Signal"
 
     def strategy_sideways():
-        # Mean Reversion
+        # Mean Reversion dengan RSI yang lebih ketat
         rsi = last['RSI']
         
-        # BUY: Oversold
-        if rsi < 45: return "BUY", f"RSI Cheap ({rsi:.1f})"
+        # RSI Divergence check: harga turun tapi RSI naik = bullish divergence
+        has_bullish_divergence = False
+        if len(df) >= 5:
+            price_falling = df['close'].iloc[-1] < df['close'].iloc[-3]
+            rsi_rising = df['RSI'].iloc[-1] > df['RSI'].iloc[-3]
+            has_bullish_divergence = price_falling and rsi_rising
+        
+        # BUY: True oversold (RSI < 30) atau "cheap zone" (RSI < 35) dengan divergence
+        if rsi < 30:
+            return "BUY", f"RSI Oversold ({rsi:.1f})"
+        if rsi < 35 and has_bullish_divergence:
+            return "BUY", f"RSI Cheap + Bullish Divergence ({rsi:.1f})"
         
         # SELL: Overbought Extreem Saja
         # PERUBAHAN PENTING: Dulu 55, sekarang 72.
