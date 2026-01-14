@@ -6,12 +6,24 @@ Mendukung Solana dan Tokocrypto dengan filtering by date dan timeframe
 
 import json
 import os
+import time
+import asyncio
+import aiohttp
 from datetime import datetime, timedelta
 import pandas as pd
 from typing import Dict, List, Tuple, Optional
 
 # Import directly from PostgreSQL database layer
 from database_pg import get_db_session, Trade, TradeState, get_all_solana_trades
+
+# =========================================
+# SOL PRICE CACHE
+# =========================================
+_sol_price_cache = {
+    "price": 200.0,      # Default/last known price
+    "timestamp": 0,       # Last fetch time
+    "ttl": 60            # Cache TTL in seconds
+}
 
 # =========================================
 # SOLANA ANALYTICS
@@ -408,24 +420,85 @@ def _get_pandas_freq(timeframe: str) -> str:
 
 def get_current_sol_price() -> float:
     """
-    Fetch current SOL price from Jupiter or fallback to a default
-    This should be integrated with an actual API in production
+    Get current SOL price with caching.
+    Uses sync wrapper for async fetch.
+    Falls back to last known price if fetch fails.
+    """
+    global _sol_price_cache
+    
+    # Check cache validity
+    now = time.time()
+    if now - _sol_price_cache["timestamp"] < _sol_price_cache["ttl"]:
+        return _sol_price_cache["price"]
+    
+    # Try to fetch new price
+    try:
+        # Check if we're in an async context
+        try:
+            loop = asyncio.get_running_loop()
+            # We're in async context, can't use run_until_complete
+            # Return cached value, let async version update it
+            return _sol_price_cache["price"]
+        except RuntimeError:
+            # No running loop, safe to create one
+            pass
+        
+        # Sync fetch using new event loop
+        price = asyncio.run(_fetch_sol_price_async())
+        if price > 0:
+            _sol_price_cache["price"] = price
+            _sol_price_cache["timestamp"] = now
+            return price
+    except Exception as e:
+        print(f"⚠️ SOL price fetch error: {e}")
+    
+    # Return cached/default price
+    return _sol_price_cache["price"]
+
+
+async def get_current_sol_price_async() -> float:
+    """
+    Async version of SOL price fetcher.
+    Use this in async contexts (e.g., FastAPI endpoints).
+    """
+    global _sol_price_cache
+    
+    # Check cache validity
+    now = time.time()
+    if now - _sol_price_cache["timestamp"] < _sol_price_cache["ttl"]:
+        return _sol_price_cache["price"]
+    
+    # Fetch new price
+    try:
+        price = await _fetch_sol_price_async()
+        if price > 0:
+            _sol_price_cache["price"] = price
+            _sol_price_cache["timestamp"] = now
+            return price
+    except Exception as e:
+        print(f"⚠️ SOL price fetch error: {e}")
+    
+    return _sol_price_cache["price"]
+
+
+async def _fetch_sol_price_async() -> float:
+    """
+    Fetch SOL price from Jupiter Price API.
+    Returns 0 if fetch fails (caller should use cached value).
     """
     try:
-        # Try to fetch from Jupiter API
-        import aiohttp
-        import asyncio
-        
-        async def fetch():
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    "https://price.jup.ag/v4/price?ids=SOL"
-                ) as resp:
+        timeout = aiohttp.ClientTimeout(total=5)  # 5 second timeout
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                "https://price.jup.ag/v4/price?ids=SOL"
+            ) as resp:
+                if resp.status == 200:
                     data = await resp.json()
-                    return data.get("data", {}).get("SOL", {}).get("price", 200.0)
-        
-        # This needs to be called in an async context
-        # For now, return default
-        return 200.0
-    except:
-        return 200.0
+                    price = data.get("data", {}).get("SOL", {}).get("price", 0)
+                    return float(price) if price else 0
+    except asyncio.TimeoutError:
+        print("⚠️ SOL price fetch timeout")
+    except Exception as e:
+        print(f"⚠️ SOL price fetch error: {e}")
+    
+    return 0
