@@ -66,6 +66,10 @@ class PaperTradingAccount:
         """
         Place market buy order (virtual)
         
+        Fee/Slippage structure (matches real exchange):
+        1. Slippage: Affects execution price (buy higher)
+        2. Fee: Taken from gross trade value
+        
         Args:
             symbol: Trading pair (e.g., 'BTC/USDT')
             amount_usdt: Amount in USDT to buy
@@ -82,17 +86,20 @@ class PaperTradingAccount:
                 'available': self.balance
             }
         
-        # Apply slippage (buy at slightly higher price)
+        # Step 1: Apply slippage to execution price (buy at slightly higher price)
         execution_price = current_price * (1 + self.slippage_pct)
+        slippage_cost = amount_usdt * self.slippage_pct  # For logging
         
-        # Calculate fee
+        # Step 2: Calculate fee from gross amount (standard exchange behavior)
         fee = amount_usdt * self.trading_fee
         
-        # Calculate amount of asset to buy
-        net_usdt = amount_usdt - fee
-        asset_amount = net_usdt / execution_price
+        # Step 3: Calculate actual asset received
+        # Gross USDT buys at execution_price, minus fee
+        gross_asset_amount = amount_usdt / execution_price
+        fee_in_asset = fee / execution_price  # Fee deducted from received asset
+        asset_amount = gross_asset_amount - fee_in_asset
         
-        # Update balance
+        # Update balance (full amount deducted)
         self.balance -= amount_usdt
         
         # Update or create position
@@ -100,9 +107,9 @@ class PaperTradingAccount:
             # Average up
             old_position = self.positions[symbol]
             old_value = old_position['amount'] * old_position['entry_price']
-            new_value = net_usdt
+            new_value = asset_amount * execution_price
             total_amount = old_position['amount'] + asset_amount
-            avg_price = (old_value + new_value) / total_amount
+            avg_price = (old_value + new_value) / total_amount if total_amount > 0 else execution_price
             
             self.positions[symbol] = {
                 'amount': total_amount,
@@ -116,15 +123,19 @@ class PaperTradingAccount:
                 'timestamp': datetime.now().isoformat()
             }
         
-        # Record order
+        # Record order with detailed breakdown
         order = {
             'id': len(self.orders_history) + 1,
             'type': 'MARKET_BUY',
             'symbol': symbol,
             'amount_usdt': amount_usdt,
+            'market_price': current_price,
             'execution_price': execution_price,
             'asset_amount': asset_amount,
             'fee': fee,
+            'fee_pct': self.trading_fee * 100,
+            'slippage_cost': slippage_cost,
+            'slippage_pct': self.slippage_pct * 100,
             'timestamp': datetime.now().isoformat(),
             'status': 'filled'
         }
@@ -142,6 +153,10 @@ class PaperTradingAccount:
     def place_market_sell(self, symbol: str, percentage: float, current_price: float) -> Dict:
         """
         Place market sell order (virtual)
+        
+        Fee/Slippage structure (matches real exchange):
+        1. Slippage: Affects execution price (sell lower)
+        2. Fee: Taken from gross proceeds
         
         Args:
             symbol: Trading pair
@@ -168,18 +183,21 @@ class PaperTradingAccount:
                 'amount': sell_amount
             }
         
-        # Apply slippage (sell at slightly lower price)
+        # Step 1: Apply slippage to execution price (sell at slightly lower price)
         execution_price = current_price * (1 - self.slippage_pct)
+        slippage_cost = sell_amount * current_price * self.slippage_pct  # For logging
         
-        # Calculate proceeds
+        # Step 2: Calculate gross proceeds (before fee)
         gross_proceeds = sell_amount * execution_price
+        
+        # Step 3: Calculate fee from gross proceeds (standard exchange behavior)
         fee = gross_proceeds * self.trading_fee
         net_proceeds = gross_proceeds - fee
         
-        # Calculate profit
+        # Calculate profit (using entry cost vs net proceeds)
         cost_basis = sell_amount * position['entry_price']
         profit = net_proceeds - cost_basis
-        profit_pct = (profit / cost_basis) * 100
+        profit_pct = (profit / cost_basis) * 100 if cost_basis > 0 else 0
         
         # Update balance
         self.balance += net_proceeds
@@ -190,15 +208,20 @@ class PaperTradingAccount:
         else:
             self.positions[symbol]['amount'] -= sell_amount
         
-        # Record order
+        # Record order with detailed breakdown
         order = {
             'id': len(self.orders_history) + 1,
             'type': 'MARKET_SELL',
             'symbol': symbol,
             'asset_amount': sell_amount,
+            'market_price': current_price,
             'execution_price': execution_price,
+            'gross_proceeds': gross_proceeds,
             'proceeds': net_proceeds,
             'fee': fee,
+            'fee_pct': self.trading_fee * 100,
+            'slippage_cost': slippage_cost,
+            'slippage_pct': self.slippage_pct * 100,
             'timestamp': datetime.now().isoformat(),
             'status': 'filled'
         }
