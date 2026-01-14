@@ -321,7 +321,11 @@ async def auto_trading_loop():
 
     TP = 0.025  # 2.5% take profit
     SL = 0.02   # 2% stop loss (ratio 1.25:1, need ~44.44% win rate)
-    TRADE_USDT = 12.0
+    
+    # P4: Dynamic position sizing based on volatility
+    BASE_TRADE_USDT = 12.0   # Minimum/base position
+    MAX_TRADE_USDT = 50.0    # Maximum cap
+    BASE_RISK_PCT = 2.0      # Base risk per trade
 
     try:
         while IS_BOT_RUNNING:
@@ -453,13 +457,29 @@ async def auto_trading_loop():
                         
                         signal, price, indicators = await strategy.analyze_market(exchange, symbol)
                         
+                        # P4: Calculate ATR-based dynamic position size
+                        atr_pct = indicators.get('atr_pct', 2.0)  # Default 2% if not available
+                        portfolio_value = hunter_risk.current_balance
+                        
+                        sizing = strategy.calculate_atr_position_size(
+                            base_risk_pct=BASE_RISK_PCT,
+                            atr_pct=atr_pct,
+                            portfolio_value=portfolio_value,
+                            entry_price=price
+                        )
+                        
+                        # Clamp position value between min and max
+                        TRADE_USDT = max(BASE_TRADE_USDT, min(MAX_TRADE_USDT, sizing.get('position_value', BASE_TRADE_USDT)))
+                        
                         # Log all signals (BUY, SELL, HOLD) for frontend display
                         if signal == "BUY":
                             action_msg = "BUY"
                             reason = indicators.get('reason', 'Signal detected')
                             strategy_type = indicators.get('strategy', 'UNKNOWN')
                             htf = indicators.get('htf_signal', 'NEUTRAL')
+                            vol_factor = sizing.get('volatility_factor', 1.0)
                             sys_logger.add_log(f"📊 {symbol} | {strategy_type} | {reason} | HTF:{htf} -> {action_msg}")
+                            sys_logger.add_log(f"💰 Size: ${TRADE_USDT:.2f} | ATR:{atr_pct:.2f}% | VolFactor:{vol_factor:.2f}x")
                         elif signal == "SELL":
                             reason = indicators.get('reason', 'Signal detected')
                             strategy_type = indicators.get('strategy', 'UNKNOWN')
