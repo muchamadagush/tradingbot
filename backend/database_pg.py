@@ -298,6 +298,61 @@ class RiskManagerState(Base):
         return f"<RiskManagerState {self.bot_type} daily_pnl={self.daily_pnl}>"
 
 
+class SolanaTrade(Base):
+    """
+    Solana/Jupiter swap transactions.
+    Replaces solana_trades.json for ACID compliance.
+    """
+    __tablename__ = "solana_trades"
+
+    id = Column(Integer, primary_key=True)
+    trade_id = Column(String(50), unique=True, nullable=False, index=True)  # e.g., SOL-1768311357
+    timestamp = Column(DateTime, nullable=False, index=True)
+    symbol = Column(String(30), nullable=False, index=True)  # e.g., SPX/SOL
+    side = Column(String(10), nullable=False)  # BUY or SELL
+    
+    # Amounts
+    amount_in = Column(Float, nullable=False)
+    amount_out = Column(Float, nullable=False)
+    price = Column(Float, default=0.0)  # Calculated price
+    
+    # Token info
+    token_address = Column(String(100))  # Mint address
+    txid = Column(String(100))  # Transaction signature
+    
+    # Status and source
+    status = Column(String(50), default='Success')
+    source = Column(String(20), default='Jupiter')
+    
+    # Metadata
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    __table_args__ = (
+        Index('idx_solana_trades_symbol', 'symbol'),
+        Index('idx_solana_trades_timestamp', 'timestamp'),
+        Index('idx_solana_trades_side', 'side'),
+    )
+    
+    def __repr__(self):
+        return f"<SolanaTrade {self.trade_id} {self.symbol} {self.side}>"
+    
+    def to_dict(self):
+        """Convert to dict for API responses (backward compatible with JSON format)"""
+        return {
+            "id": self.trade_id,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "symbol": self.symbol,
+            "side": self.side,
+            "price": self.price,
+            "amount_in": self.amount_in,
+            "amount_out": self.amount_out,
+            "token_address": self.token_address,
+            "txid": self.txid,
+            "status": self.status,
+            "source": self.source
+        }
+
+
 # ===== DATABASE INITIALIZATION =====
 def init_pg_db():
     """
@@ -526,6 +581,131 @@ def save_risk_manager_state(
         session.commit()
     finally:
         session.close()
+
+
+# ===== SOLANA TRADES PERSISTENCE =====
+def save_solana_trade(
+    trade_id: str,
+    timestamp: datetime,
+    symbol: str,
+    side: str,
+    amount_in: float,
+    amount_out: float,
+    token_address: str = None,
+    txid: str = None,
+    status: str = "Success",
+    source: str = "Jupiter",
+    price: float = 0.0
+) -> Optional[dict]:
+    """Save a Solana trade to PostgreSQL."""
+    session = get_db_session()
+    try:
+        trade = SolanaTrade(
+            trade_id=trade_id,
+            timestamp=timestamp,
+            symbol=symbol,
+            side=side,
+            amount_in=amount_in,
+            amount_out=amount_out,
+            token_address=token_address,
+            txid=txid,
+            status=status,
+            source=source,
+            price=price
+        )
+        session.add(trade)
+        session.commit()
+        return trade.to_dict()
+    except Exception as e:
+        session.rollback()
+        print(f"⚠️ Error saving Solana trade: {e}")
+        return None
+    finally:
+        session.close()
+
+
+def get_solana_trades(limit: int = 50) -> List[dict]:
+    """Get recent Solana trades."""
+    session = get_db_session()
+    try:
+        trades = session.query(SolanaTrade).order_by(SolanaTrade.timestamp.desc()).limit(limit).all()
+        return [t.to_dict() for t in trades]
+    finally:
+        session.close()
+
+
+def get_all_solana_trades() -> List[dict]:
+    """Get all Solana trades for analytics."""
+    session = get_db_session()
+    try:
+        trades = session.query(SolanaTrade).order_by(SolanaTrade.timestamp.desc()).all()
+        return [t.to_dict() for t in trades]
+    finally:
+        session.close()
+
+
+def migrate_solana_trades_from_json(json_path: str = "solana_trades.json") -> int:
+    """
+    Migrate existing Solana trades from JSON file to PostgreSQL.
+    Returns number of trades migrated.
+    """
+    import json
+    import os
+    
+    if not os.path.exists(json_path):
+        print(f"ℹ️ No JSON file found at {json_path}")
+        return 0
+    
+    try:
+        with open(json_path, "r") as f:
+            trades = json.load(f)
+    except Exception as e:
+        print(f"⚠️ Error reading JSON: {e}")
+        return 0
+    
+    session = get_db_session()
+    migrated = 0
+    
+    try:
+        for t in trades:
+            # Check if already exists
+            existing = session.query(SolanaTrade).filter_by(trade_id=t.get("id")).first()
+            if existing:
+                continue
+            
+            # Parse timestamp
+            ts_str = t.get("timestamp")
+            try:
+                timestamp = datetime.fromisoformat(ts_str) if ts_str else datetime.utcnow()
+            except:
+                timestamp = datetime.utcnow()
+            
+            trade = SolanaTrade(
+                trade_id=t.get("id", f"SOL-{int(datetime.utcnow().timestamp())}"),
+                timestamp=timestamp,
+                symbol=t.get("symbol", "UNKNOWN/SOL"),
+                side=t.get("side", "BUY"),
+                amount_in=float(t.get("amount_in", 0)),
+                amount_out=float(t.get("amount_out", 0)),
+                token_address=t.get("token_address"),
+                txid=t.get("txid"),
+                status=t.get("status", "Success"),
+                source=t.get("source", "Jupiter"),
+                price=float(t.get("price", 0))
+            )
+            session.add(trade)
+            migrated += 1
+        
+        session.commit()
+        print(f"✅ Migrated {migrated} Solana trades from JSON to PostgreSQL")
+        
+    except Exception as e:
+        session.rollback()
+        print(f"❌ Migration error: {e}")
+    finally:
+        session.close()
+    
+    return migrated
 
 
 # ===== CONNECTION MANAGEMENT =====

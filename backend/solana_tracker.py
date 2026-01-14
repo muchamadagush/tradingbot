@@ -1,24 +1,27 @@
 # File: backend/solana_tracker.py
-import json
-import os
+"""
+Solana trade tracker - now using PostgreSQL for persistence.
+Maintains backward compatibility with existing API.
+"""
 import time
 from datetime import datetime
 
-FILE_PATH = "solana_trades.json"
+# Import from PostgreSQL layer
+from database_pg import save_solana_trade, get_solana_trades, get_all_solana_trades
 
-def load_history():
-    """Membaca riwayat dari file JSON"""
-    if not os.path.exists(FILE_PATH):
-        return []
-    try:
-        with open(FILE_PATH, "r") as f:
-            return json.load(f)
-    except:
-        return []
+
+def load_history(limit: int = 50):
+    """Load trade history from PostgreSQL"""
+    return get_solana_trades(limit=limit)
+
+
+def load_all_history():
+    """Load all trade history for analytics"""
+    return get_all_solana_trades()
+
 
 def save_trade(txid, input_token, output_token, input_amount, output_estimate, status="Success", token_address=None):
     """Menyimpan transaksi baru dengan deteksi BUY/SELL yang akurat"""
-    history = load_history()
     
     # --- LOGIKA DETEKSI SIDE (BUY/SELL) ---
     # Jika input adalah SOL/WSOL, berarti kita membeli token lain (BUY)
@@ -46,28 +49,39 @@ def save_trade(txid, input_token, output_token, input_amount, output_estimate, s
     print(f"   TxID: {txid}")
     print(f"{'='*60}\n")
     
-    trade = {
-        "id": f"SOL-{int(time.time())}", # ID Unik
-        "timestamp": datetime.now().isoformat(),
+    # Generate unique trade ID
+    trade_id = f"SOL-{int(time.time())}"
+    timestamp = datetime.now()
+    
+    # Save to PostgreSQL
+    trade = save_solana_trade(
+        trade_id=trade_id,
+        timestamp=timestamp,
+        symbol=symbol,
+        side=side,
+        amount_in=input_amount,
+        amount_out=output_estimate,
+        token_address=token_address,
+        txid=txid,
+        status=status,
+        source="Jupiter",
+        price=0  # Calculated later if needed
+    )
+    
+    if trade:
+        return trade
+    
+    # Fallback: return dict if DB save failed
+    return {
+        "id": trade_id,
+        "timestamp": timestamp.isoformat(),
         "symbol": symbol,
         "side": side,
-        "price": 0, # Kita hitung nanti di frontend
+        "price": 0,
         "amount_in": input_amount,
         "amount_out": output_estimate,
-        "token_address": token_address,  # Mint Address untuk verifikasi
+        "token_address": token_address,
         "txid": txid,
         "status": status,
         "source": "Jupiter"
     }
-    
-    # Simpan di paling atas (terbaru)
-    history.insert(0, trade)
-    
-    # Batasi cuma simpan 50 transaksi terakhir
-    if len(history) > 50:
-        history = history[:50]
-        
-    with open(FILE_PATH, "w") as f:
-        json.dump(history, f, indent=4)
-        
-    return trade

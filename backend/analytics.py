@@ -11,22 +11,15 @@ import pandas as pd
 from typing import Dict, List, Tuple, Optional
 
 # Import directly from PostgreSQL database layer
-from database_pg import get_db_session, Trade, TradeState
+from database_pg import get_db_session, Trade, TradeState, get_all_solana_trades
 
 # =========================================
 # SOLANA ANALYTICS
 # =========================================
 
 def load_solana_trades():
-    """Load solana trades from JSON file"""
-    filepath = "solana_trades.json"
-    if not os.path.exists(filepath):
-        return []
-    try:
-        with open(filepath, "r") as f:
-            return json.load(f)
-    except:
-        return []
+    """Load solana trades from PostgreSQL"""
+    return get_all_solana_trades()
 
 
 def calculate_solana_analytics(
