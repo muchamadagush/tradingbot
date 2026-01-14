@@ -95,12 +95,93 @@ async def shutdown_event():
     """Cleanup on shutdown."""
     ws_log_handler.uninstall()
 
+# ==========================================
+# CORS CONFIGURATION (Secure by Environment)
+# ==========================================
+
+def get_cors_origins() -> list:
+    """
+    Get allowed CORS origins from environment.
+    
+    - Development: If ALLOWED_ORIGINS is empty or "*", allow all (for local dev only)
+    - Production: Parse comma-separated list of allowed origins
+    
+    Examples:
+        ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000
+        ALLOWED_ORIGINS=https://myapp.example.com,https://admin.example.com
+    """
+    allowed = os.getenv("ALLOWED_ORIGINS", "").strip()
+    env_mode = os.getenv("ENV_MODE", "development").lower()
+    
+    # In production, require explicit origins
+    if env_mode == "production":
+        if not allowed or allowed == "*":
+            # Default to same-origin only in production if not configured
+            sys_logger.log("[CORS] WARNING: No ALLOWED_ORIGINS set in production. Using restrictive default.")
+            return ["https://localhost"]
+        
+        origins = [o.strip() for o in allowed.split(",") if o.strip()]
+        sys_logger.log(f"[CORS] Production mode - Allowed origins: {origins}")
+        return origins
+    
+    # Development mode - more permissive
+    if not allowed or allowed == "*":
+        # Allow common dev origins
+        dev_origins = [
+            "http://localhost:5173",    # Vite default
+            "http://localhost:3000",    # Common React port
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:3000",
+            "http://localhost:8000",    # FastAPI docs
+            "http://127.0.0.1:8000",
+        ]
+        sys_logger.log(f"[CORS] Development mode - Using default dev origins")
+        return dev_origins
+    
+    # Parse explicit origins for dev
+    origins = [o.strip() for o in allowed.split(",") if o.strip()]
+    sys_logger.log(f"[CORS] Development mode - Allowed origins: {origins}")
+    return origins
+
+
+# Allowed HTTP methods (restrict in production)
+def get_cors_methods() -> list:
+    """Get allowed HTTP methods based on environment."""
+    env_mode = os.getenv("ENV_MODE", "development").lower()
+    
+    if env_mode == "production":
+        # Only methods actually used by the API
+        return ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    
+    return ["*"]  # Allow all in development
+
+
+# Allowed headers
+def get_cors_headers() -> list:
+    """Get allowed headers - includes auth headers."""
+    return [
+        "Content-Type",
+        "Authorization",         # JWT Bearer token
+        "X-API-Key",            # API key auth
+        "X-Request-ID",         # Request tracking
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+    ]
+
+
+CORS_ORIGINS = get_cors_origins()
+CORS_METHODS = get_cors_methods()
+CORS_HEADERS = get_cors_headers()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=CORS_METHODS,
+    allow_headers=CORS_HEADERS,
+    expose_headers=["X-Request-ID", "X-RateLimit-Remaining"],  # Headers client can read
+    max_age=600,  # Cache preflight for 10 minutes
 )
 
 # ==========================================
