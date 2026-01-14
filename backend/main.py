@@ -6,7 +6,7 @@ import os
 import asyncio
 import ccxt.async_support as ccxt
 from dotenv import load_dotenv
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -32,12 +32,68 @@ from risk_manager import BotRiskRegistry
 from jupiter_handler import jupiter_bot
 from solana_auto import solana_auto
 from global_kill_switch import kill_switch
+from websocket_manager import ws_manager, ws_log_handler
 
 # ==========================================
 # ENV & APP INIT
 # ==========================================
 
 app = FastAPI()
+
+# ==========================================
+# WEBSOCKET ENDPOINT
+# ==========================================
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time updates.
+    Clients receive: bot_status, trade_update, system_log, balance_update, solana_status, price_update
+    """
+    await ws_manager.connect(websocket)
+    try:
+        # Send initial state on connect
+        await websocket.send_json({
+            "type": "connected",
+            "data": {
+                "message": "WebSocket connected",
+                "bot_running": IS_BOT_RUNNING,
+                "activity": CURRENT_SCAN_TARGET,
+            }
+        })
+        
+        # Keep connection alive and handle incoming messages
+        while True:
+            try:
+                # Wait for ping/pong or client messages
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                # Handle ping
+                if data == "ping":
+                    await websocket.send_text("pong")
+            except asyncio.TimeoutError:
+                # Send keepalive ping
+                try:
+                    await websocket.send_json({"type": "ping"})
+                except:
+                    break
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        pass
+    finally:
+        await ws_manager.disconnect(websocket)
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Install WebSocket log handler on startup."""
+    ws_log_handler.install()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown."""
+    ws_log_handler.uninstall()
 
 app.add_middleware(
     CORSMiddleware,
@@ -215,6 +271,22 @@ def save_buy_trade(symbol, price, amount, usdt, bot_type="HUNTER"):
         )
         session.add(ledger_open)
     
+    # Broadcast trade update via WebSocket
+    try:
+        import asyncio
+        asyncio.create_task(ws_manager.broadcast_trade_update({
+            "id": trade_id,
+            "symbol": symbol,
+            "side": "BUY",
+            "buy_price": price,
+            "amount": amount,
+            "total_usdt": usdt,
+            "status": "OPEN",
+            "bot_type": bot_type,
+        }))
+    except RuntimeError:
+        pass  # No event loop
+    
     return trade_id
 
 def save_sell_trade(trade_id, sell_price, profit, reason="TP_HIT"):
@@ -265,6 +337,20 @@ def save_sell_trade(trade_id, sell_price, profit, reason="TP_HIT"):
             reason=reason
         )
         session.add(ledger_closed)
+    
+    # Broadcast trade update via WebSocket
+    try:
+        import asyncio
+        asyncio.create_task(ws_manager.broadcast_trade_update({
+            "id": trade_id,
+            "side": "SELL",
+            "sell_price": sell_price,
+            "profit_usdt": profit,
+            "status": "CLOSED",
+            "reason": reason,
+        }))
+    except RuntimeError:
+        pass  # No event loop
     
     return True
 

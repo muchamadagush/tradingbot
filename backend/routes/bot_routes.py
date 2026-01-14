@@ -26,14 +26,21 @@ def home():
 @router.post("/bot/toggle")
 async def toggle_bot(bg: BackgroundTasks):
     """Toggle the Hunter trading bot on/off."""
-    from main import IS_BOT_RUNNING, auto_trading_loop
+    from main import IS_BOT_RUNNING, auto_trading_loop, CURRENT_SCAN_TARGET
+    from websocket_manager import ws_manager
     import main
+    import asyncio
     
     main.IS_BOT_RUNNING = not main.IS_BOT_RUNNING
 
     if main.IS_BOT_RUNNING:
         bg.add_task(auto_trading_loop)
+        # Broadcast status change via WebSocket
+        asyncio.create_task(ws_manager.broadcast_bot_status(True, main.CURRENT_SCAN_TARGET))
         return {"status": "running"}
+    
+    # Broadcast status change via WebSocket
+    asyncio.create_task(ws_manager.broadcast_bot_status(False, "Stopped"))
     return {"status": "stopped"}
 
 

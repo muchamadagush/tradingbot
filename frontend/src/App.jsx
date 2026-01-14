@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import axios from 'axios'
 import './App.css'
 import { DashboardTab } from './components/DashboardTab'
@@ -7,8 +7,10 @@ import { PaperTradingTab } from './components/PaperTradingTab'
 import { RiskManagementTab } from './components/RiskManagementTab'
 import { FeeCalculatorTab } from './components/FeeCalculatorTab'
 import AnalyticsTab from './components/AnalyticsTab'
+import { useWebSocket } from './hooks/useWebSocket'
 
 const VITE_API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+const VITE_WS_URL = import.meta.env.VITE_WS_URL || VITE_API_URL.replace('http', 'ws') + '/ws'
 
 function App() {
   const [serverStatus, setServerStatus] = useState("Checking...")
@@ -37,6 +39,77 @@ function App() {
   // --- DATA PENDUKUNG ---
   const [history, setHistory] = useState([])
   const availableTokens = ["USDC", "USDT", "BONK", "WIF", "RAY", "JUP", "PYTH"]
+
+  // --- WEBSOCKET MESSAGE HANDLER ---
+  const handleWsMessage = useCallback((message) => {
+    const { type, data } = message
+    
+    switch (type) {
+      case 'connected':
+        setServerStatus("Connected (WS)")
+        if (data.bot_running !== undefined) {
+          setBotStatus(prev => ({
+            ...prev,
+            is_running: data.bot_running,
+            current_activity: data.activity || prev.current_activity,
+          }))
+        }
+        break
+        
+      case 'bot_status':
+        setBotStatus(data)
+        // Update active symbol from activity
+        if (data.current_activity) {
+          const parts = data.current_activity.split(" ")
+          if (parts.length > 1 && (data.current_activity.includes("Managing") || data.current_activity.includes("Scanning"))) {
+            setActiveSymbol(parts[1].trim())
+          }
+        }
+        break
+        
+      case 'trade_update':
+        // Add or update trade in history
+        setHistory(prev => {
+          const exists = prev.find(t => t.id === data.id && t.source === 'Hunter')
+          if (exists) {
+            return prev.map(t => (t.id === data.id && t.source === 'Hunter') ? { ...t, ...data } : t)
+          }
+          return [{ ...data, source: 'Hunter' }, ...prev].slice(0, 50)
+        })
+        break
+        
+      case 'system_log':
+        setSystemLogs(prev => [data.message, ...prev].slice(0, 50))
+        break
+        
+      case 'balance_update':
+        setBalances(data)
+        break
+        
+      case 'solana_status':
+        setSolanaAutoStatus(data)
+        if (data.strategy && data.is_running) {
+          setSolanaStrategy(data.strategy)
+        }
+        break
+        
+      case 'price_update':
+        if (data.symbol === activeSymbol) {
+          setMarketData(prev => ({ ...prev, ...data }))
+        }
+        break
+        
+      default:
+        break
+    }
+  }, [activeSymbol])
+
+  // --- WEBSOCKET CONNECTION ---
+  const { isConnected, connectionState, shouldUseFallback } = useWebSocket(
+    VITE_WS_URL,
+    handleWsMessage,
+    { fallbackPolling: true, pollingInterval: 2000 }
+  )
 
   // --- FUNGSI UTAMA (FETCH DATA LOOP) ---
   const fetchData = async () => {
@@ -139,7 +212,54 @@ function App() {
     } catch (e) { alert("Gagal toggle auto") }
   }
 
-  useEffect(() => { fetchData(); const i = setInterval(fetchData, 2000); return () => clearInterval(i) }, [])
+  // Initial data fetch
+  useEffect(() => { fetchData() }, [])
+
+  // Polling fallback when WebSocket is not connected
+  useEffect(() => {
+    if (shouldUseFallback) {
+      console.log('[Polling] WebSocket unavailable, using fallback polling')
+      const interval = setInterval(fetchData, 2000)
+      return () => clearInterval(interval)
+    } else if (isConnected) {
+      // When connected via WS, fetch data less frequently for things not pushed via WS
+      // (like balances, prices which may not be pushed every time)
+      const interval = setInterval(() => {
+        // Only fetch data that's not pushed via WebSocket
+        fetchBalancesAndPrices()
+      }, 5000)
+      return () => clearInterval(interval)
+    }
+  }, [shouldUseFallback, isConnected])
+
+  // Lighter fetch for WS-connected mode
+  const fetchBalancesAndPrices = async () => {
+    try {
+      // Solana balances
+      const resBal = await axios.get(`${VITE_API_URL}/api/solana/balance`)
+      setBalances(resBal.data)
+      
+      // Market price
+      const resPrice = await axios.get(`${VITE_API_URL}/api/toko/price/${activeSymbol}`)
+      setMarketData(resPrice.data)
+      
+      // Solana auto status
+      const resAuto = await axios.get(`${VITE_API_URL}/api/solana/auto/status`)
+      setSolanaAutoStatus(resAuto.data)
+    } catch (e) {
+      console.debug('[WS] Background fetch error', e)
+    }
+  }
+
+  // Connection status display
+  const getConnectionDisplay = () => {
+    if (isConnected) return { text: 'Connected (WS)', color: '#2ecc71' }
+    if (connectionState === 'reconnecting') return { text: 'Reconnecting...', color: '#f39c12' }
+    if (connectionState === 'fallback') return { text: 'Connected (Polling)', color: '#3498db' }
+    if (serverStatus === 'Connected') return { text: 'Connected', color: '#2ecc71' }
+    return { text: serverStatus, color: '#e74c3c' }
+  }
+  const connectionDisplay = getConnectionDisplay()
 
   const tabs = [
     { id: 'trading', label: '🎯 Trading', icon: '📱' },
@@ -155,7 +275,10 @@ function App() {
 
       <div style={{ textAlign: 'center', marginBottom: '30px' }}>
         <h1>🦅 Crypto Hybrid Bot</h1>
-        <p style={{ fontSize: '14px', color: '#bdc3c7' }}>System: <span style={{ color: serverStatus === 'Connected' ? '#2ecc71' : '#e74c3c', fontWeight: 'bold' }}>{serverStatus}</span></p>
+        <p style={{ fontSize: '14px', color: '#bdc3c7' }}>
+          System: <span style={{ color: connectionDisplay.color, fontWeight: 'bold' }}>{connectionDisplay.text}</span>
+          {isConnected && <span style={{ marginLeft: '8px', fontSize: '10px' }}>⚡ Real-time</span>}
+        </p>
       </div>
 
       {/* TAB NAVIGATION */}
