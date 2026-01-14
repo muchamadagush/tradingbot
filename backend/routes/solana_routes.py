@@ -3,10 +3,11 @@
 Solana/Jupiter trading endpoints
 """
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from pydantic import BaseModel
 import solana_tracker
 from auth import require_trader, optional_auth, AuthUser
+from rate_limiter import limiter, RATE_LIMIT_TRADING, RATE_LIMIT_READONLY
 
 router = APIRouter(prefix="/api/solana", tags=["solana"])
 
@@ -23,7 +24,8 @@ class SwapRequest(BaseModel):
 
 
 @router.get("/balance")
-async def sol_balance(user: AuthUser = Depends(optional_auth)):
+@limiter.limit(RATE_LIMIT_READONLY)
+async def sol_balance(request: Request, user: AuthUser = Depends(optional_auth)):
     """Get Solana token balances. Read-only access."""
     from jupiter_handler import jupiter_bot
     return await jupiter_bot.get_token_balances()
@@ -46,8 +48,9 @@ async def solana_quote(req: QuoteRequest, user: AuthUser = Depends(optional_auth
 
 
 @router.post("/swap")
-async def solana_swap(req: SwapRequest, user: AuthUser = Depends(require_trader)):
-    """Execute Jupiter swap. Requires trader role."""
+@limiter.limit(RATE_LIMIT_TRADING)
+async def solana_swap(request: Request, req: SwapRequest, user: AuthUser = Depends(require_trader)):
+    """Execute Jupiter swap. Requires trader role. Rate limited to 10/min."""
     from jupiter_handler import jupiter_bot
     result = await jupiter_bot.execute_swap(req.quote_response)
     return result

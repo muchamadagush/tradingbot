@@ -107,6 +107,26 @@ class APIKeyStore:
             del self._keys[key_hash]
             return True
         return False
+    
+    def generate_key(self, user_id: str, role: UserRole) -> str:
+        """Generate a new API key for a user."""
+        api_key = secrets.token_urlsafe(32)
+        self.add_key(api_key, user_id, role)
+        return api_key
+    
+    def list_users(self) -> list:
+        """List all registered users (without exposing keys)."""
+        return [
+            {"user_id": user_id, "role": role.value, "key_prefix": key_hash[:8] + "..."}
+            for key_hash, (user_id, role) in self._keys.items()
+        ]
+    
+    def revoke_by_user_id(self, user_id: str) -> int:
+        """Revoke all keys for a user. Returns count of revoked keys."""
+        to_remove = [h for h, (uid, _) in self._keys.items() if uid == user_id]
+        for h in to_remove:
+            del self._keys[h]
+        return len(to_remove)
 
 
 # Global API key store
@@ -370,13 +390,15 @@ class TokenResponse(BaseModel):
 
 def create_auth_router():
     """Create auth router with login endpoint."""
-    from fastapi import APIRouter
+    from fastapi import APIRouter, Request
+    from rate_limiter import limiter, RATE_LIMIT_AUTH, RATE_LIMIT_READONLY
     
     router = APIRouter(prefix="/api/auth", tags=["auth"])
     
     @router.post("/login", response_model=TokenResponse)
-    async def login(req: LoginRequest):
-        """Exchange API key for JWT token."""
+    @limiter.limit(RATE_LIMIT_AUTH)
+    async def login(request: Request, req: LoginRequest):
+        """Exchange API key for JWT token. Rate limited to 5/min to prevent brute force."""
         user = api_key_store.validate_key(req.api_key)
         if not user:
             raise HTTPException(status_code=401, detail="Invalid API key")
@@ -389,7 +411,8 @@ def create_auth_router():
         )
     
     @router.get("/me")
-    async def get_me(user: AuthUser = Depends(require_auth)):
+    @limiter.limit(RATE_LIMIT_READONLY)
+    async def get_me(request: Request, user: AuthUser = Depends(require_auth)):
         """Get current user info."""
         return {
             "user_id": user.user_id,
@@ -397,13 +420,96 @@ def create_auth_router():
         }
     
     @router.get("/status")
-    async def auth_status():
+    @limiter.limit(RATE_LIMIT_READONLY)
+    async def auth_status(request: Request):
         """Get auth configuration status (public)."""
         return {
             "auth_mode": AUTH_MODE,
             "auth_enabled": AUTH_MODE != "disabled",
             "jwt_enabled": AUTH_MODE in ("jwt", "both"),
             "api_key_enabled": AUTH_MODE in ("api_key", "both"),
+        }
+    
+    # ==========================================
+    # ADMIN API KEY MANAGEMENT
+    # ==========================================
+    
+    class CreateUserRequest(BaseModel):
+        user_id: str
+        role: str = "trader"  # admin, trader, readonly
+    
+    class CreateUserResponse(BaseModel):
+        user_id: str
+        role: str
+        api_key: str
+        message: str
+    
+    @router.get("/users")
+    async def list_users(user: AuthUser = Depends(require_admin)):
+        """List all registered API key users. Admin only."""
+        return {
+            "users": api_key_store.list_users(),
+            "total": len(api_key_store.list_users()),
+        }
+    
+    @router.post("/users", response_model=CreateUserResponse)
+    async def create_user(req: CreateUserRequest, user: AuthUser = Depends(require_admin)):
+        """Create a new API key user. Admin only."""
+        # Validate role
+        try:
+            role = UserRole(req.role.lower())
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: {[r.value for r in UserRole]}")
+        
+        # Generate API key
+        api_key = api_key_store.generate_key(req.user_id, role)
+        
+        return CreateUserResponse(
+            user_id=req.user_id,
+            role=role.value,
+            api_key=api_key,
+            message="API key created successfully. Store it securely - it cannot be retrieved again.",
+        )
+    
+    @router.delete("/users/{user_id}")
+    async def delete_user(user_id: str, user: AuthUser = Depends(require_admin)):
+        """Revoke all API keys for a user. Admin only."""
+        if user_id == user.user_id:
+            raise HTTPException(status_code=400, detail="Cannot delete your own user")
+        
+        count = api_key_store.revoke_by_user_id(user_id)
+        if count == 0:
+            raise HTTPException(status_code=404, detail=f"User '{user_id}' not found")
+        
+        return {
+            "status": "deleted",
+            "user_id": user_id,
+            "keys_revoked": count,
+        }
+    
+    @router.post("/users/{user_id}/regenerate")
+    async def regenerate_key(user_id: str, user: AuthUser = Depends(require_admin)):
+        """Regenerate API key for a user (revokes old key). Admin only."""
+        # Find user's current role
+        current_users = api_key_store.list_users()
+        user_info = next((u for u in current_users if u["user_id"] == user_id), None)
+        
+        if not user_info:
+            raise HTTPException(status_code=404, detail=f"User '{user_id}' not found")
+        
+        role = UserRole(user_info["role"])
+        
+        # Revoke old keys
+        api_key_store.revoke_by_user_id(user_id)
+        
+        # Generate new key
+        new_key = api_key_store.generate_key(user_id, role)
+        
+        return {
+            "user_id": user_id,
+            "role": role.value,
+            "api_key": new_key,
+            "message": "New API key generated. Old key(s) revoked.",
         }
     
     return router

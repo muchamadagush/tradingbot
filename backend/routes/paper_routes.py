@@ -3,9 +3,10 @@
 Paper trading endpoints
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from auth import require_trader, optional_auth, AuthUser
+from rate_limiter import limiter, RATE_LIMIT_TRADING, RATE_LIMIT_READONLY
 
 router = APIRouter(prefix="/api/paper", tags=["paper"])
 
@@ -21,7 +22,8 @@ class PaperSellRequest(BaseModel):
 
 
 @router.get("/account")
-async def paper_account(user: AuthUser = Depends(optional_auth)):
+@limiter.limit(RATE_LIMIT_READONLY)
+async def paper_account(request: Request, user: AuthUser = Depends(optional_auth)):
     """Get paper trading account summary. Read-only access."""
     from main import exchange
     import paper_trading
@@ -37,8 +39,9 @@ async def paper_account(user: AuthUser = Depends(optional_auth)):
 
 
 @router.post("/buy")
-async def paper_buy(req: PaperBuyRequest, user: AuthUser = Depends(require_trader)):
-    """Execute paper buy order. Requires trader role."""
+@limiter.limit(RATE_LIMIT_TRADING)
+async def paper_buy(request: Request, req: PaperBuyRequest, user: AuthUser = Depends(require_trader)):
+    """Execute paper buy order. Requires trader role. Rate limited to 10/min."""
     from main import exchange, hunter_risk
     import paper_trading
     
@@ -63,8 +66,9 @@ async def paper_buy(req: PaperBuyRequest, user: AuthUser = Depends(require_trade
 
 
 @router.post("/sell")
-async def paper_sell(req: PaperSellRequest, user: AuthUser = Depends(require_trader)):
-    """Execute paper sell order. Requires trader role."""
+@limiter.limit(RATE_LIMIT_TRADING)
+async def paper_sell(request: Request, req: PaperSellRequest, user: AuthUser = Depends(require_trader)):
+    """Execute paper sell order. Requires trader role. Rate limited to 10/min."""
     from main import exchange
     import paper_trading
     
@@ -81,13 +85,13 @@ async def paper_sell(req: PaperSellRequest, user: AuthUser = Depends(require_tra
 
 
 @router.post("/reset")
-async def paper_reset(user: AuthUser = Depends(require_trader)):
-    """Reset paper trading account. Requires trader role."""
+@limiter.limit(RATE_LIMIT_TRADING)
+async def paper_reset(request: Request, user: AuthUser = Depends(require_trader)):
+    """Reset paper trading account. Requires trader role. Rate limited to 10/min."""
     from main import PAPER_INITIAL_BALANCE
     import paper_trading
     
     paper_trading.paper_account.reset_account(PAPER_INITIAL_BALANCE)
-    return {"status": "reset", "balance": PAPER_INITIAL_BALANCE}
     return {"status": "reset", "balance": PAPER_INITIAL_BALANCE}
 
 

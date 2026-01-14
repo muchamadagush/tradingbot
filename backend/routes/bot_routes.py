@@ -3,9 +3,10 @@
 Bot control and trade history endpoints
 """
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from pydantic import BaseModel
 from auth import require_trader, optional_auth, AuthUser
+from rate_limiter import limiter, RATE_LIMIT_TRADING, RATE_LIMIT_READONLY
 
 router = APIRouter(prefix="/api", tags=["bot"])
 
@@ -25,8 +26,9 @@ def home():
 
 
 @router.post("/bot/toggle")
-async def toggle_bot(bg: BackgroundTasks, user: AuthUser = Depends(require_trader)):
-    """Toggle the Hunter trading bot on/off. Requires trader role."""
+@limiter.limit(RATE_LIMIT_TRADING)
+async def toggle_bot(request: Request, bg: BackgroundTasks, user: AuthUser = Depends(require_trader)):
+    """Toggle the Hunter trading bot on/off. Requires trader role. Rate limited to 10/min."""
     from main import IS_BOT_RUNNING, auto_trading_loop, CURRENT_SCAN_TARGET
     from websocket_manager import ws_manager
     import main
@@ -46,7 +48,8 @@ async def toggle_bot(bg: BackgroundTasks, user: AuthUser = Depends(require_trade
 
 
 @router.get("/bot/status")
-def bot_status():
+@limiter.limit(RATE_LIMIT_READONLY)
+def bot_status(request: Request):
     """Get current bot status."""
     from main import IS_BOT_RUNNING, CURRENT_SCAN_TARGET
     return {

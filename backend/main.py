@@ -33,12 +33,23 @@ from jupiter_handler import jupiter_bot
 from solana_auto import solana_auto
 from global_kill_switch import kill_switch
 from websocket_manager import ws_manager, ws_log_handler
+from rate_limiter import setup_rate_limiting, limiter
 
 # ==========================================
 # ENV & APP INIT
 # ==========================================
 
-app = FastAPI()
+app = FastAPI(
+    title="TradingBot API",
+    description="Crypto Trading Bot with Tokocrypto and Solana support",
+    version="2.0.0",
+)
+
+# ==========================================
+# RATE LIMITING SETUP
+# ==========================================
+
+setup_rate_limiting(app)
 
 # ==========================================
 # WEBSOCKET ENDPOINT
