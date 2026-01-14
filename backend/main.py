@@ -135,6 +135,7 @@ CURRENT_SCAN_TARGET = "Idle"
 # Trailing Stop State (per trade_id)
 # {trade_id: {"high_price": float, "trailing_stop": float}}
 TRAILING_STOP_STATE = {}
+TRAILING_STOP_LOCK = asyncio.Lock()  # Protect concurrent access
 
 # Trailing Stop Config
 TRAILING_STOP_ACTIVATION_PCT = 0.01   # Activate after 1% profit
@@ -376,28 +377,29 @@ async def auto_trading_loop():
                 exit_reason = None
                 should_exit = False
                 
-                # Initialize trailing stop state for this trade
-                if trade_id not in TRAILING_STOP_STATE:
-                    TRAILING_STOP_STATE[trade_id] = {
-                        "high_price": price,
-                        "trailing_active": False
-                    }
-                
-                ts_state = TRAILING_STOP_STATE[trade_id]
-                
-                # Update high water mark
-                if price > ts_state["high_price"]:
-                    ts_state["high_price"] = price
-                
-                # Activate trailing stop when profit reaches threshold
-                if pnl_pct >= TRAILING_STOP_ACTIVATION_PCT:
-                    ts_state["trailing_active"] = True
-                    trailing_stop_price = ts_state["high_price"] * (1 - TRAILING_STOP_DISTANCE_PCT)
+                # Initialize trailing stop state for this trade (with lock)
+                async with TRAILING_STOP_LOCK:
+                    if trade_id not in TRAILING_STOP_STATE:
+                        TRAILING_STOP_STATE[trade_id] = {
+                            "high_price": price,
+                            "trailing_active": False
+                        }
                     
-                    # Check if trailing stop hit
-                    if price <= trailing_stop_price:
-                        should_exit = True
-                        exit_reason = "TRAILING_STOP"
+                    ts_state = TRAILING_STOP_STATE[trade_id]
+                    
+                    # Update high water mark
+                    if price > ts_state["high_price"]:
+                        ts_state["high_price"] = price
+                    
+                    # Activate trailing stop when profit reaches threshold
+                    if pnl_pct >= TRAILING_STOP_ACTIVATION_PCT:
+                        ts_state["trailing_active"] = True
+                        trailing_stop_price = ts_state["high_price"] * (1 - TRAILING_STOP_DISTANCE_PCT)
+                        
+                        # Check if trailing stop hit
+                        if price <= trailing_stop_price:
+                            should_exit = True
+                            exit_reason = "TRAILING_STOP"
                 
                 # Regular TP/SL still applies
                 if pnl_pct >= TP:
@@ -424,9 +426,10 @@ async def auto_trading_loop():
                     save_sell_trade(active.id, price, profit, reason=exit_reason)
                     hunter_risk.record_trade_pnl(profit)
                     
-                    # Cleanup trailing stop state
-                    if trade_id in TRAILING_STOP_STATE:
-                        del TRAILING_STOP_STATE[trade_id]
+                    # Cleanup trailing stop state (with lock)
+                    async with TRAILING_STOP_LOCK:
+                        if trade_id in TRAILING_STOP_STATE:
+                            del TRAILING_STOP_STATE[trade_id]
                     
                     sys_logger.add_log(f"📊 Trade closed: {symbol} | {exit_reason} | PnL: ${profit:.2f}")
 
