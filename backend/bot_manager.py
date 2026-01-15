@@ -9,8 +9,16 @@ import os
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 import sys_logger
+
+# Database Imports
+from sqlalchemy import text
+from database_pg import (
+    get_db_session, session_scope, 
+    Trade, BacktestResult, OpenPosition, 
+    TradeState
+)
 
 # ==========================================
 # UNIFIED POSITION TRACKER
@@ -38,51 +46,114 @@ class Position:
     def from_dict(cls, data: Dict) -> "Position":
         return cls(**data)
 
-
 class UnifiedPositionTracker:
-    """Track positions across all bots in one place."""
-    
-    POSITIONS_FILE = "unified_positions.json"
+    """Track positions across all bots using PostgreSQL OpenPosition table."""
     
     def __init__(self):
         self.positions: Dict[str, Position] = {}
+        # Initial load from DB
         self.load()
     
     def load(self):
-        """Load positions from file."""
-        if not os.path.exists(self.POSITIONS_FILE):
-            return
-        
+        """Load positions from PostgreSQL database."""
         try:
-            with open(self.POSITIONS_FILE, "r") as f:
-                data = json.load(f)
-                self.positions = {
-                    k: Position.from_dict(v) for k, v in data.items()
-                }
-            sys_logger.add_log(f"📂 Loaded {len(self.positions)} unified positions")
+            with session_scope() as session:
+                db_positions = session.query(OpenPosition).all()
+                self.positions = {}
+                
+                for db_pos in db_positions:
+                    # Convert DB model to Position dataclass
+                    # Note: OpenPosition table might not have all metadata fields, 
+                    # so we map what is available.
+                    pos = Position(
+                        id=str(db_pos.id),
+                        bot_type=db_pos.bot_type or "UNKNOWN",
+                        symbol=db_pos.symbol,
+                        token_address=None,  # Not currently in OpenPosition table
+                        entry_price=float(db_pos.entry_price),
+                        current_price=float(db_pos.current_price),
+                        amount=float(db_pos.amount),
+                        entry_time=db_pos.opened_at.timestamp(),
+                        unrealized_pnl=float(db_pos.unrealized_pnl),
+                        strategy="DB_LOADED",
+                        metadata={}
+                    )
+                    self.positions[str(db_pos.id)] = pos
+                    
+            sys_logger.add_log(f"📂 Loaded {len(self.positions)} active positions from DB")
         except Exception as e:
-            sys_logger.add_log(f"⚠️ Failed to load positions: {e}")
+            sys_logger.add_log(f"⚠️ Failed to load positions from DB: {e}")
             self.positions = {}
     
     def save(self):
-        """Save positions to file."""
-        try:
-            with open(self.POSITIONS_FILE, "w") as f:
-                data = {k: v.to_dict() for k, v in self.positions.items()}
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            sys_logger.add_log(f"⚠️ Failed to save positions: {e}")
+        """
+        No-op: Persistence is handled per-operation in PostgreSQL.
+        Kept for backward compatibility if needed.
+        """
+        pass
     
     def add_position(self, position: Position):
-        """Add or update a position."""
+        """Add or update a position in Database and Memory."""
+        # 1. Update Memory
         self.positions[position.id] = position
-        self.save()
+        
+        # 2. Update Database
+        try:
+            with session_scope() as session:
+                # Check if exists (try to find by symbol and bot_type to avoid duplicates)
+                # or by ID if it's numeric
+                db_pos = None
+                if position.id.isdigit():
+                    db_pos = session.query(OpenPosition).filter_by(id=int(position.id)).first()
+                
+                if not db_pos:
+                    # Try finding by symbol
+                    db_pos = session.query(OpenPosition).filter_by(
+                        symbol=position.symbol, 
+                        bot_type=position.bot_type
+                    ).first()
+
+                if db_pos:
+                    # Update existing
+                    db_pos.current_price = position.current_price
+                    db_pos.unrealized_pnl = position.unrealized_pnl
+                    db_pos.amount = position.amount
+                else:
+                    # Insert new
+                    new_pos = OpenPosition(
+                        symbol=position.symbol,
+                        amount=position.amount,
+                        entry_price=position.entry_price,
+                        current_price=position.current_price,
+                        unrealized_pnl=position.unrealized_pnl,
+                        bot_type=position.bot_type,
+                        opened_at=datetime.fromtimestamp(position.entry_time)
+                    )
+                    session.add(new_pos)
+                    # Flush to get ID if needed, though we primarily use symbol/bot_type for tracking
+                    session.flush()
+                    # Update ID in memory object if it was a temp ID
+                    if not position.id.isdigit():
+                        del self.positions[position.id]
+                        position.id = str(new_pos.id)
+                        self.positions[position.id] = position
+
+        except Exception as e:
+            sys_logger.add_log(f"⚠️ Failed to persist position {position.symbol}: {e}")
     
     def remove_position(self, position_id: str):
-        """Remove a position."""
+        """Remove a position from Database and Memory."""
+        # 1. Remove from Memory
         if position_id in self.positions:
             del self.positions[position_id]
-            self.save()
+        
+        # 2. Remove from Database
+        try:
+            if position_id.isdigit():
+                with session_scope() as session:
+                    session.query(OpenPosition).filter_by(id=int(position_id)).delete()
+        except Exception as e:
+            sys_logger.add_log(f"⚠️ Failed to remove position {position_id} from DB: {e}")
     
     def get_position(self, position_id: str) -> Optional[Position]:
         """Get a specific position."""
@@ -109,14 +180,16 @@ class UnifiedPositionTracker:
         return sum(p.unrealized_pnl for p in self.positions.values())
     
     def update_price(self, position_id: str, current_price: float):
-        """Update current price and recalculate P&L."""
+        """Update current price and recalculate P&L in DB."""
         if position_id not in self.positions:
             return
         
         pos = self.positions[position_id]
         pos.current_price = current_price
         pos.unrealized_pnl = (current_price - pos.entry_price) * pos.amount
-        self.save()
+        
+        # Persist update to DB
+        self.add_position(pos)
     
     def get_summary(self) -> Dict:
         """Get summary of all positions."""
@@ -128,10 +201,8 @@ class UnifiedPositionTracker:
             "positions": positions_list,
         }
 
-
 # Global tracker
 position_tracker = UnifiedPositionTracker()
-
 
 # ==========================================
 # BASE BOT INTERFACE
@@ -171,7 +242,7 @@ class BaseBot(ABC):
         }
     
     def update_config(self, new_config: Dict):
-        """Hot-reload config without restart (P5)."""
+        """Hot-reload config without restart."""
         self.config.update(new_config)
         sys_logger.add_log(f"🔄 {self.name} config updated: {list(new_config.keys())}")
 
@@ -283,10 +354,6 @@ bot_registry = BotRegistry()
 # LOG ROTATION & DB ARCHIVING (P5)
 # ==========================================
 
-import sqlite3
-from datetime import timedelta
-
-
 def rotate_logs(max_entries: int = 1000):
     """Rotate system logs to keep only recent entries."""
     # sys_logger already keeps last 50, but we can extend this
@@ -296,88 +363,73 @@ def rotate_logs(max_entries: int = 1000):
         sys_logger.add_log(f"🔄 Logs rotated: kept last {max_entries} entries")
 
 
-def archive_old_trades(db_path: str = "crypto_bot.db", days_old: int = 30):
-    """Archive trades older than N days to a separate table."""
+def archive_old_trades(days_old: int = 30):
+    """Archive trades older than N days to a separate table using PostgreSQL."""
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        cutoff_date = datetime.now() - timedelta(days=days_old)
-        cutoff_str = cutoff_date.isoformat()
-        
-        # Create archive table if not exists
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS trades_archive (
-                id INTEGER PRIMARY KEY,
-                symbol TEXT,
-                side TEXT,
-                price REAL,
-                amount REAL,
-                total_usdt REAL,
-                fee REAL,
-                timestamp TEXT,
-                profit_usdt REAL,
-                is_closed INTEGER,
-                closed_at TEXT,
-                close_reason TEXT,
-                bot_type TEXT,
-                archived_at TEXT
-            )
-        """)
-        
-        # Move old closed trades to archive
-        cursor.execute("""
-            INSERT INTO trades_archive 
-            SELECT *, ? FROM trades 
-            WHERE is_closed = 1 AND closed_at < ?
-        """, (datetime.now().isoformat(), cutoff_str))
-        
-        # Delete archived trades from main table
-        cursor.execute("""
-            DELETE FROM trades 
-            WHERE is_closed = 1 AND closed_at < ?
-        """, (cutoff_str,))
-        
-        archived_count = cursor.rowcount
-        conn.commit()
-        conn.close()
-        
-        if archived_count > 0:
-            sys_logger.add_log(f"🗄️ Archived {archived_count} old trades")
-        
-        return archived_count
-        
+        with session_scope() as session:
+            cutoff_date = datetime.now() - timedelta(days=days_old)
+            
+            # Ensure archive table exists (should be handled by migration, but checking here is safe)
+            # Insert closed trades into archive
+            archive_sql = text('''
+                INSERT INTO trades_archive (
+                    id, symbol, side, buy_price, amount, total_usdt, fee_paid, created_at, 
+                    profit_usdt, status, closed_at, bot_type, archived_at
+                )
+                SELECT 
+                    id, symbol, side, buy_price, amount, total_usdt, fee_paid, created_at, 
+                    profit_usdt, status, closed_at, bot_type, :archived_at
+                FROM trades 
+                WHERE status = 'CLOSED' AND closed_at < :cutoff
+                ON CONFLICT (id) DO NOTHING
+            ''')
+            
+            result = session.execute(archive_sql, {
+                "archived_at": datetime.now(), 
+                "cutoff": cutoff_date
+            })
+            
+            # Delete from main table
+            delete_sql = text('''
+                DELETE FROM trades 
+                WHERE status = 'CLOSED' AND closed_at < :cutoff
+            ''')
+            
+            del_result = session.execute(delete_sql, {"cutoff": cutoff_date})
+            
+            archived_count = del_result.rowcount
+            if archived_count > 0:
+                sys_logger.add_log(f"🗄️ Archived {archived_count} old trades to trades_archive")
+            
+            return archived_count
+            
     except Exception as e:
         sys_logger.add_log(f"⚠️ Archive failed: {e}")
         return 0
 
 
-def archive_old_backtest_results(db_path: str = "crypto_bot.db", keep_count: int = 50):
-    """Keep only the most recent backtest results."""
+def archive_old_backtest_results(keep_count: int = 50):
+    """Keep only the most recent backtest results in PostgreSQL."""
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        # Get count
-        cursor.execute("SELECT COUNT(*) FROM backtest_results")
-        total = cursor.fetchone()[0]
-        
-        if total > keep_count:
-            # Delete oldest results
-            cursor.execute(f"""
-                DELETE FROM backtest_results 
-                WHERE id NOT IN (
-                    SELECT id FROM backtest_results 
-                    ORDER BY created_at DESC 
-                    LIMIT {keep_count}
-                )
-            """)
-            deleted = cursor.rowcount
-            conn.commit()
-            sys_logger.add_log(f"🗄️ Cleaned up {deleted} old backtest results")
-        
-        conn.close()
-        
+        with session_scope() as session:
+            # Check count
+            count = session.query(BacktestResult).count()
+            
+            if count > keep_count:
+                # Delete oldest, keeping top N sorted by creation
+                delete_sql = text('''
+                    DELETE FROM backtest_results 
+                    WHERE id NOT IN (
+                        SELECT id FROM backtest_results 
+                        ORDER BY created_at DESC 
+                        LIMIT :keep_count
+                    )
+                ''')
+                
+                result = session.execute(delete_sql, {"keep_count": keep_count})
+                deleted = result.rowcount
+                sys_logger.add_log(f"🗄️ Cleaned up {deleted} old backtest results")
+                
     except Exception as e:
         sys_logger.add_log(f"⚠️ Backtest cleanup failed: {e}")
 
