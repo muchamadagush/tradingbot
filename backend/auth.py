@@ -24,8 +24,10 @@ import jwt
 # ==========================================
 
 # Load from environment
-API_KEY_SECRET = os.getenv("API_KEY_SECRET", secrets.token_hex(32))
-JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_hex(32))
+API_KEY_SECRET = os.getenv("API_KEY_SECRET")
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not API_KEY_SECRET or not JWT_SECRET:
+    raise RuntimeError("API_KEY_SECRET and JWT_SECRET environment variables must be set.")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", "24"))
 

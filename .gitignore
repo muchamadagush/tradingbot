@@ -21,6 +21,56 @@ backend/solana_positions.json
 # backend/solana_trades.json  <-- Boleh di-uncomment kalau tidak mau simpan history trading
 # backend/trades.db           <-- Boleh di-uncomment kalau tidak mau simpan database toko
 
-# --- SECURITY (WAJIB) ---
+
+# Python/FastAPI Trading Bot .gitignore
+venv/
+env/
 .env
-backend/.env
+.env.*
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+*.sqlite
+*.log
+*.logs
+*.pid
+*.json
+*.state
+*.bak
+.DS_Store
+.cache/
+.cache
+*.egg-info/
+.eggs/
+*.egg
+.cover
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.pytest_cache/
+
+# FastAPI/Starlette
+instance/
+
+# VSCode
+.vscode/
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Docker
+*.pid
+*.sock
+
+# Git
+.git/
+.gitignore
+
+# System
+Thumbs.db

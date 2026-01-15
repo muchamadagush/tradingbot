@@ -18,12 +18,29 @@ import os
 
 # Configuration
 SQLITE_DB = "crypto_bot.db"
+pg_host = os.getenv("POSTGRES_HOST")
+pg_port = os.getenv("POSTGRES_PORT")
+pg_user = os.getenv("POSTGRES_USER")
+pg_pass = os.getenv("POSTGRES_PASS")
+
+if not pg_pass:
+    print("ERROR: POSTGRES_PASSWORD environment variable not set.")
+    sys.exit(1)
+if not pg_user:
+    print("ERROR: POSTGRES_USER environment variable not set.")
+    sys.exit(1)
+if not pg_port:
+    print("ERROR: POSTGRES_PORT environment variable not set.")
+    sys.exit(1)
+if not pg_host:
+    print("ERROR: POSTGRES_HOST environment variable not set.")
+    sys.exit(1)
 PG_CONNECTION = {
     'database': os.getenv('PG_DB', 'crypto_bot'),
-    'user': os.getenv('PG_USER', 'trader'),
-    'password': os.getenv('PG_PASSWORD', 'password'),
-    'host': os.getenv('PG_HOST', 'localhost'),
-    'port': os.getenv('PG_PORT', '5432'),
+    'user': pg_user,
+    'password': pg_pass,
+    'host': pg_host,
+    'port': pg_port,
 }
 
 # Statistics

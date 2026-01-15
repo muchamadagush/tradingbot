@@ -53,6 +53,8 @@ SWAP_URL = f"https://{TARGET_HOST}/swap/v1/swap"
 RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 PRIVATE_KEY = os.getenv("SOLANA_PRIVATE_KEY")
 API_KEY = os.getenv("JUPITER_API_KEY")
+if not PRIVATE_KEY or not API_KEY:
+    raise RuntimeError("SOLANA_PRIVATE_KEY and JUPITER_API_KEY environment variables must be set.")
 IS_SIMULATION = os.getenv("IS_SIMULATION", "TRUE").upper() == "TRUE"
 
 class MagicResolver(DefaultResolver):

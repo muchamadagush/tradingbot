@@ -243,13 +243,10 @@ if BOT_MODE == "PAPER":
     sys_logger.add_log("📄 PAPER MODE: Using Binance public API for testing")
 else:
     # Live mode - requires Tokocrypto credentials
-    toko_key = os.getenv("TOKO_API_KEY", "")
-    toko_secret = os.getenv("TOKO_SECRET_KEY", "")
-    
+    toko_key = os.getenv("TOKO_API_KEY")
+    toko_secret = os.getenv("TOKO_SECRET_KEY")
     if not toko_key or not toko_secret:
-        sys_logger.add_log("⚠️ WARNING: No Tokocrypto credentials, using Binance public API")
-        BOT_MODE = "PAPER"
-    
+        raise RuntimeError("TOKO_API_KEY and TOKO_SECRET_KEY environment variables must be set for live trading.")
     # Try Tokocrypto first (if it exists in CCXT), fallback to Binance
     try:
         # Attempt to use Tokocrypto (may fail if not available in this CCXT version)
